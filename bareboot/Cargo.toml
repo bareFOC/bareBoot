@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bareboot-protocol",
+    "crates/bareboot-core",
+    "targets/bareboot-ch32v203",
+    "targets/bareboot-stm32g0",
+    "targets/bareboot-stm32f1",
+    "targets/bareboot-stm32f1-usb",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+
+[workspace.dependencies]
+bareboot-protocol = { path = "crates/bareboot-protocol" }
+bareboot-core = { path = "crates/bareboot-core" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = false
+debug = true

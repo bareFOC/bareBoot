@@ -1,0 +1,14 @@
+[package]
+name = "bareboot-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure no_std Katapult-compatible protocol framing and commands"
+
+[dependencies]
+
+[features]
+default = []
+std = []
+
+[dev-dependencies]

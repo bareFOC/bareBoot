@@ -1,0 +1,17 @@
+[package]
+name = "bareboot-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Interactive terminal cockpit for BareBoot"
+
+[dependencies]
+bareboot-client = { path = "../bareboot-client" }
+ratatui = "0.30"
+ratatui-braille-bar = "0.3"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[features]
+default = []

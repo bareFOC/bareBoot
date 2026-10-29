@@ -1,0 +1,12 @@
+[package]
+name = "bareboot-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "no_std bootloader runtime traits and state machine"
+
+[dependencies]
+bareboot-protocol = { workspace = true }
+
+[features]
+default = []

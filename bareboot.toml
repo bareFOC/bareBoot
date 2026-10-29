@@ -1,0 +1,10 @@
+target = "ch32v203"
+mcu = "ch32v203c8t6"
+system_clock_hz = 144000000
+flash_size = 8192
+ram_size = 10240
+app_base = 0x08002000
+boot_window_ms = 250
+transports = ["can", "i2c"]
+can_bitrate = 1000000
+i2c_target_address = 0x40

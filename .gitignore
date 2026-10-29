@@ -1,0 +1,14 @@
+!.github/
+
+.*/
+ref/
+references/
+
+# build outputs
+out/
+target/
+targets/
+
+# Python cache
+__pycache__/
+*.pyc

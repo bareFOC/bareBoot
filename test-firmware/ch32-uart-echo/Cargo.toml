@@ -1,0 +1,14 @@
+[package]
+name = "ch32-uart-echo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+riscv-rt = "0.16"
+panic-halt = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

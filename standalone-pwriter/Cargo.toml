@@ -1,0 +1,16 @@
+[package]
+name = "standalone-pwriter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bareboot-core = { path = "../bareboot/crates/bareboot-core" }
+bareboot-protocol = { path = "../bareboot/crates/bareboot-protocol" }
+cortex-m-rt = "0.7"
+panic-halt = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

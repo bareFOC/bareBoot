@@ -1,0 +1,30 @@
+[package]
+name = "ch32-usb-boot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ch32-hal = { path = "../ref/ch32-hal", features = [
+    "ch32v203c8t6",
+    "rt",
+    "embassy",
+    "memory-x",
+    "time-driver-tim2",
+    "exti",
+], default-features = false }
+bareboot-core = { path = "../bareboot/crates/bareboot-core" }
+bareboot-protocol = { path = "../bareboot/crates/bareboot-protocol" }
+embassy-executor = { version = "0.10.0", features = ["arch-cortex-m", "executor-thread"] }
+embassy-time = "0.5.1"
+embassy-usb = { version = "0.6.0" }
+usb-device = "0.3.2"
+usbd-serial = "0.2.2"
+qingke-rt = "0.8.2"
+panic-halt = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

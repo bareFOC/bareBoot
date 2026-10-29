@@ -1,0 +1,17 @@
+[package]
+name = "bareboot-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless Katapult-compatible flashing engine"
+
+[dependencies]
+bareboot-protocol = { path = "../../../bareboot/crates/bareboot-protocol" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[features]
+default = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

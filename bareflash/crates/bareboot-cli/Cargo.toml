@@ -1,0 +1,12 @@
+[package]
+name = "bareboot-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "placeholder"
+
+[dependencies]
+bareboot-client = { path = "../bareboot-client" }
+
+[features]
+default = []
