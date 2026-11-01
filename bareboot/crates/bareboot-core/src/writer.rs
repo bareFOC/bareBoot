@@ -93,16 +93,6 @@ impl<F: FlashTarget, const PAGE: usize> PagedWriter<F, PAGE> {
         self.flash.write_page_bytes(self.page_base, &self.page)?;
         let mut check = [0u8; 4];
         self.flash.read_bytes(self.page_base, &mut check)?;
-        // Debug UART: send check bytes if Cortex-M3.
-        #[cfg(target_arch = "arm")]
-        unsafe {
-            let sr = 0x4001_3800 as *const u32;
-            let dr = 0x4001_3804 as *mut u32;
-            for &b in &check {
-                while core::ptr::read_volatile(sr) & (1 << 7) == 0 {}
-                core::ptr::write_volatile(dr, b as u32 + 100);
-            }
-        }
         if check != self.page[..4] { return Err(CoreError::Flash); }
         self.pages_written += 1;
         self.page_base += PAGE as u32;

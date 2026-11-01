@@ -39,3 +39,32 @@
 - `ref/ch32fun/extralibs/fsusb.c` is only ~1.1kloc and contains enough USBFS descriptor handling for CDC transports.
 - It may be cheaper to reuse the **transformation patterns** from `ch32fun` than to adopt `stm32-usbd + ch32-hal`, mainly for a 16–24 KiB experimental image.
 - Production 4/8 KiB BareBoot images still need a hand-ported C-to-Rust translation because the stack is WCH-specific.
+
+### USB transaction (latest)
+A HAL-based CH32 USB target now runs through CONNECT + RX_BLOCK and reports:
+```text
+connected: mcu=ch32v203c8 block_size=64 app_base=0x8001000
+progress: 100% (60/60)
+eof: 1 pages written
+done
+```
+Readback of `0x08001000` returned `0x03 25 c1 15 …` instead of the uploaded `00 50 00 20 …` pattern. The USB framing layer is close, but the flash programming result is not yet honoring the host payload.
+
+### Next root-cause work
+1. Inspect `erase_page`/`write_page_bytes` with a forced readback marker.
+2. Ensure `PagedWriter` does not confuse USB burst boundaries or use an incorrect word formatting path.
+3. Compare with `ch32fun/extralibs/ch20x_30x_flash.h` before ever assuming a 256-byte page operation succeeded.
+4. Do not use `--no-verify` until readback succeeds.
+
+## USB low-level hardware note
+- Latest `wlink status` still returns the 0x55 protocol error and no WCH transaction is available in `--watch-serial`.
+- The WCH-Link should stay on **RV mode** for all CH32V203 work.
+- If the link drops into probe mode, rerun:
+  ```bash
+  wlink mode-switch --rv
+  ```
+
+## CH32 UART deferred — USB is now the primary CH32 path
+- CH32 UART CONNECT handshake and frame readback are **deferred**; focus has shifted to the USBFS CDC transport.
+- Do not block CH32 USB work on UART validation.
+- CH32 UART verification should only resume after low-level USB byte contract is proven.

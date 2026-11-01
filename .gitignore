@@ -4,10 +4,13 @@
 ref/
 references/
 
+katapult/
+test-*/
+
 # build outputs
 out/
 target/
-targets/
+/targets/
 
 # Python cache
 __pycache__/

@@ -1,0 +1,20 @@
+[package]
+name = "bareboot-ch32v203"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CH32V203 (RISC-V QingKe) bootloader"
+
+[dependencies]
+bareboot-core = { workspace = true }
+bareboot-protocol = { workspace = true }
+riscv-rt = "0.16"
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[features]
+default = ["transport-uart"]
+transport-uart = []
+transport-can = []

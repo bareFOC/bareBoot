@@ -1,0 +1,22 @@
+[package]
+name = "bareboot-stm32g0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "bare metal target implementation (placeholder)"
+
+[dependencies]
+bareboot-core = { workspace = true }
+bareboot-protocol = { workspace = true }
+stm32-metapac = { version = "16", features = ["stm32g030c8", "pac"] }
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[features]
+default = ["transport-can"]
+transport-can = []
+transport-i2c = []
+transport-uart = []
+transport-usb = []

@@ -103,6 +103,7 @@ where
             }
         }
         commands::COMPLETE => {
+            writer.finish()?;
             writer.set_completed();
             let mut ack_payload = [0u8; 4];
             write_u32_le(&mut ack_payload, 0, commands::COMPLETE as u32);

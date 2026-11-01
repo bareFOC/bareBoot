@@ -4,9 +4,11 @@ members = [
     "crates/bareboot-protocol",
     "crates/bareboot-core",
     "targets/bareboot-ch32v203",
+    "targets/bareboot-ch32v203-usb-lowlevel",
     "targets/bareboot-stm32g0",
     "targets/bareboot-stm32f1",
     "targets/bareboot-stm32f1-usb",
+    "targets/bareboot-stm32h503",
 ]
 
 [workspace.package]

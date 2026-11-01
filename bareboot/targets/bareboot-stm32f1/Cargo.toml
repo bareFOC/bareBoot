@@ -1,0 +1,24 @@
+[package]
+name = "bareboot-stm32f1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "STM32F103 (Bluepill) target for host/protocol validation"
+
+[dependencies]
+bareboot-core = { workspace = true }
+bareboot-protocol = { workspace = true }
+cortex-m-rt = "0.7"
+cortex-m = "0.7"
+stm32-metapac = { version = "16", features = ["stm32f103c8", "pac", "rt"] }
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[features]
+default = ["transport-uart"]
+transport-can = []
+transport-i2c = []
+transport-uart = []
+transport-usb = []
