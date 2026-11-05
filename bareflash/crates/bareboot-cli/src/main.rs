@@ -21,12 +21,15 @@ struct Args {
     tries: usize,
     verify: bool,
     timeout: Duration,
+    request_bootloader: bool,
+    uuid: Option<[u8; 6]>,
     backend: Backend,
 }
 
 fn usage() -> String {
     concat!(
         "bareboot-cli --firmware <path> [--timeout <seconds>] [--tries <n>] ",
+        "[--request-bootloader | -r] [--uuid <hex>] ",
         "[--memory] | ",
         "[--serial <device> [--baud <baud>]] | ",
         "[--i2c <device> --address <hex>] | ",
@@ -47,6 +50,8 @@ fn parse_args() -> Result<Args, String> {
     let mut node_id_hex = None;
     let mut memory = false;
     let mut verify = true;
+    let mut request_bootloader = false;
+    let mut uuid = None;
 
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -59,6 +64,20 @@ fn parse_args() -> Result<Args, String> {
             }
             "--memory" => memory = true,
             "--no-verify" => verify = false,
+            "--request-bootloader" | "-r" => request_bootloader = true,
+            "--uuid" => {
+                let s = it.next().ok_or("missing uuid")?;
+                let clean = s.trim_start_matches("0x").replace([':', '-'], "");
+                if clean.len() != 12 {
+                    return Err("uuid must be 12 hex characters".to_string());
+                }
+                let mut arr = [0u8; 6];
+                for i in 0..6 {
+                    arr[i] = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16)
+                        .map_err(|_| "invalid hex in uuid".to_string())?;
+                }
+                uuid = Some(arr);
+            }
             "--serial" => serial = Some(it.next().ok_or("missing serial device")?),
             "--baud" => baud = it.next().ok_or("missing baud")?.parse().map_err(|_| "invalid baud")?,
             "--i2c" => i2c = Some(it.next().ok_or("missing i2c device")?),
@@ -113,6 +132,8 @@ fn parse_args() -> Result<Args, String> {
         firmware,
         tries,
         timeout,
+        request_bootloader,
+        uuid,
         backend,
         verify,
     })
@@ -137,6 +158,31 @@ fn make_bus(args: &Args) -> Result<Box<dyn HostBus>, String> {
 
 fn run(args: Args) -> Result<(), String> {
     let bytes = std::fs::read(&args.firmware).map_err(|e| format!("read firmware: {e}"))?;
+
+    if args.request_bootloader {
+        #[cfg(target_os = "linux")]
+        match &args.backend {
+            Backend::Serial { device, baud } => {
+                println!("requesting bootloader on serial {device}...");
+                let _ = SerialBus::touch_1200_baud(device);
+                let _ = SerialBus::request_serial_bootloader(device, *baud);
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Backend::I2c { device, address } => {
+                println!("requesting bootloader on i2c {device} at 0x{address:02x}...");
+                let _ = I2cBus::request_bootloader(device, *address);
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            Backend::Can { interface, .. } => {
+                let uuid = args.uuid.unwrap_or([0; 6]);
+                println!("requesting bootloader on can {interface} for uuid {uuid:02x?}...");
+                let _ = SocketCanBus::request_bootloader_uuid(interface, &uuid);
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Backend::Memory(_) => {}
+        }
+    }
+
     #[cfg(target_os = "linux")]
     let bus = make_bus(&args)?;
     #[cfg(not(target_os = "linux"))]

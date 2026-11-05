@@ -4,6 +4,27 @@ pub const HEADER: [u8; 2] = [0x01, 0x88];
 pub const TRAILER: [u8; 2] = [0x99, 0x03];
 pub const MAX_FRAME_BYTES: usize = 192;
 
+/// Signature identifying a Katapult/BareBoot-compatible bootloader ("CanBoot!").
+pub const BAREBOOT_MAGIC: u64 = 0x2174_6f6f_426e_6143;
+
+/// Magic token placed in SRAM mailbox to request staying in the bootloader indefinitely.
+pub const REQUEST_BOOTLOADER: u64 = 0x5984_E3FA_6CA1_589B;
+
+/// Magic token placed in SRAM mailbox when bootloader jumps to user application.
+pub const REQUEST_START_APP: u64 = 0x7b06_ec45_a9a8_243d;
+
+/// In-band UART string to trigger handsfree entry into bootloader.
+pub const SERIAL_BL_REQ: &[u8] = b"~ \x1c Request Serial Bootloader!! ~";
+
+/// 1-byte command sent over I2C/I3C to request entering bootloader.
+pub const I2C_CMD_ENTER_BOOTLOADER: u8 = 0xF0;
+
+/// Standard CAN ID for host node reboot commands.
+pub const CAN_ADMIN_REBOOT_ID: u32 = 0x3F0;
+
+/// Reboot command opcode inside the CAN reboot frame.
+pub const CAN_CMD_REBOOT: u8 = 0x02;
+
 pub mod commands {
     pub const CONNECT: u8 = 0x11;
     pub const RX_BLOCK: u8 = 0x12;

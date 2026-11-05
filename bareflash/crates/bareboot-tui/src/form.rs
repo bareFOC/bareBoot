@@ -1,4 +1,3 @@
-use ratatui::style::Style;
 use ratatui::text::Line;
 
 #[derive(Clone)]

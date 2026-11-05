@@ -4,7 +4,7 @@ A Katapult-compatible bootloader, targeting STM32, CH32, RP, and WCH-compatible 
 
 ## Supported devices
 
-Legend: `🟡` supported on this target family, `⬜` pending or in progress, `🟡` not tested for this family, `—` not available in this family checklist.
+Legend: `✅` verified on hardware, `🟡` supported / in progress, `⬜` pending, `—` not available for this family.
 
 ### STM32
 
@@ -17,7 +17,7 @@ Legend: `🟡` supported on this target family, `⬜` pending or in progress, `�
 | STM32F7 | 🟡 | 🟡 | 🟡 | — | 🟡 |
 | STM32G0 | ⬜ | 🟡 | 🟡 | 🟡 | 🟡 |
 | STM32G4 | 🟡 | 🟡 | 🟡 | ⬜ | 🟡 |
-| STM32H5 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
+| STM32H5 | 🟡 | ✅ | ✅ | 🟡 | 🟡 |
 | STM32H7 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
 | STM32L4/L5 | 🟡 | 🟡 | 🟡 | ⬜ | 🟡 |
 | STM32U5 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
@@ -37,12 +37,19 @@ Legend: `🟡` supported on this target family, `⬜` pending or in progress, `�
 | CH641 / CH643 / CH645 | ⬜ | ❓ | ❓ | ⬜ | ⬜ |
 | CH56x / CH57x / CH58x / CH59x | ⬜ | 🟡 | — | — | ⬜ |
 
+### Puya (PY32)
+
+| MCU family | USB | UART | I2C | I3C | CAN |
+|---|---:|---:|---:|---:|---:|
+| PY32F0xx (PY32F002A / F003 / F030) | — | 🟡 | 🟡 | — | — |
+| PY32F072 | 🟡 | 🟡 | 🟡 | — | 🟡 |
+
 ### Raspberry Pi
 
 | MCU family | USB | UART | I2C | I3C | CAN |
 |---|---:|---:|---:|---:|---:|
 | RP2040 | 🟡 | 🟡 | 🟡 | ⬜ | 🟡 |
-| RP2350 | 🟡 | 🟡 | 🟡 | ⬜ | ⬜ |
+| RP2350 | ✅ | 🟡 | 🟡 | ⬜ | ⬜ |
 
 ## Build
 
@@ -77,6 +84,10 @@ boot_window_ms = 300
 ```
 
 Flash profiles are stored under `./profiles/*.toml`.
+
+## Documentation
+
+- [Handsfree App Updates](docs/handsfree-app-updates.md): Detection, software jump into bootloader, cross-reset RAM mailbox, and Katapult interoperability.
 
 ## License
 

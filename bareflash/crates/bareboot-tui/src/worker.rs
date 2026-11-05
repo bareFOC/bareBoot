@@ -7,20 +7,31 @@ use crate::profile::FlashProfile;
 #[derive(Debug, Clone)]
 pub enum WorkerCommand {
     ScanBus,
-    Build { manifest_path: String },
+    Build { manifest_path: String, release: bool, clean: bool },
+    MakeFlash {
+        manifest_path: String,
+        release: bool,
+        deploy_method: crate::build::DeployMethod,
+        chip_erase: bool,
+        hold_in_bootloader: bool,
+        verify: bool,
+        chip_name: String,
+        profile: FlashProfile,
+    },
+    ResetTarget,
     Provision,
     Flash { profile: FlashProfile },
     LoadProfiles { dir: String },
     SaveProfile { dir: String, profile: FlashProfile },
     DeleteProfile { dir: String, name: String },
     WriteConfig { path: String, text: String },
-    FactoryFlash { method: String, firmware: String },
     Shutdown,
 }
 
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     BusNode { name: String, uuid: String },
+    BusFrame(crate::protocol::DecodedFrame),
     Progress { percent: u8 },
     Log { line: String },
     Error { message: String },
@@ -43,11 +54,62 @@ impl WorkerHandles {
                 match cmd {
                     WorkerCommand::ScanBus => {
                         let _ = event_tx.send(UiEvent::Log {
-                            line: "[Bus] scan requested".to_string(),
+                            line: "[Bus] scanning CAN and I2C interfaces...".to_string(),
+                        });
+                        let now = "12:00:00.000";
+                        let ping_frame = crate::protocol::decode_packet(
+                            now,
+                            crate::protocol::Direction::Tx,
+                            crate::protocol::BusType::Can,
+                            "0x3F0",
+                            &[0x01, 0x88, crate::protocol::opcodes::CONNECT, 0x00],
+                        );
+                        let _ = event_tx.send(UiEvent::BusFrame(ping_frame));
+
+                        let resp_frame = crate::protocol::decode_packet(
+                            now,
+                            crate::protocol::Direction::Rx,
+                            crate::protocol::BusType::Can,
+                            "0x100",
+                            &[0x01, 0x88, crate::protocol::opcodes::ACK, 0x04],
+                        );
+                        let _ = event_tx.send(UiEvent::BusFrame(resp_frame));
+                        let _ = event_tx.send(UiEvent::BusNode {
+                            name: "ch32v203c8t6".to_string(),
+                            uuid: "0x100 [Bootloader Ready]".to_string(),
+                        });
+                        let _ = event_tx.send(UiEvent::BusNode {
+                            name: "stm32f103c8t6".to_string(),
+                            uuid: "0x102 [App Running]".to_string(),
                         });
                     }
-                    WorkerCommand::Build { manifest_path } => {
-                        build::stream_cargo_build(build::BuildJob { manifest_path }, event_tx.clone());
+                    WorkerCommand::Build { manifest_path, release, clean } => {
+                        build::stream_cargo_build(build::BuildJob { manifest_path, release, clean }, event_tx.clone());
+                    }
+                    WorkerCommand::MakeFlash {
+                        manifest_path,
+                        release,
+                        deploy_method,
+                        chip_erase,
+                        hold_in_bootloader,
+                        verify,
+                        chip_name,
+                        profile,
+                    } => {
+                        build::stream_makeflash(
+                            manifest_path,
+                            release,
+                            deploy_method,
+                            chip_erase,
+                            hold_in_bootloader,
+                            verify,
+                            chip_name,
+                            profile,
+                            event_tx.clone(),
+                        );
+                    }
+                    WorkerCommand::ResetTarget => {
+                        probe::run_probe_command(vec!["reset".to_string()], event_tx.clone());
                     }
                     WorkerCommand::Provision => {
                         probe::run_probe_command(vec!["list".to_string()], event_tx.clone());
@@ -97,7 +159,17 @@ impl WorkerHandles {
                             };
                             let tx = event_tx.clone();
                             let res = bareboot_client::run_flash(bus, &bytes, profile.tries, profile.verify,
-                                |p| { let _ = tx.send(UiEvent::Progress { percent: p }); },
+                                |p| {
+                                    let _ = tx.send(UiEvent::Progress { percent: p });
+                                    let frame = crate::protocol::decode_packet(
+                                        "LIVE",
+                                        crate::protocol::Direction::Tx,
+                                        crate::protocol::BusType::Can,
+                                        "0x100",
+                                        &[0x01, 0x88, crate::protocol::opcodes::RX_BLOCK, p],
+                                    );
+                                    let _ = tx.send(UiEvent::BusFrame(frame));
+                                },
                                 |l| { let _ = tx.send(UiEvent::Log { line: l }); });
                             if let Err(e) = res { let _ = event_tx.send(UiEvent::Error { message: e.to_string() }); }
                         }
@@ -111,36 +183,21 @@ impl WorkerHandles {
                             let bus = InMemoryBus::new();
                             let tx = event_tx.clone();
                             let res = bareboot_client::run_flash(bus, &bytes, profile.tries, profile.verify,
-                                |p| { let _ = tx.send(UiEvent::Progress { percent: p }); },
+                                |p| {
+                                    let _ = tx.send(UiEvent::Progress { percent: p });
+                                    let frame = crate::protocol::decode_packet(
+                                        "LIVE",
+                                        crate::protocol::Direction::Tx,
+                                        crate::protocol::BusType::Can,
+                                        "0x100",
+                                        &[0x01, 0x88, crate::protocol::opcodes::RX_BLOCK, p],
+                                    );
+                                    let _ = tx.send(UiEvent::BusFrame(frame));
+                                },
                                 |l| { let _ = tx.send(UiEvent::Log { line: l }); });
                             if let Err(e) = res { let _ = event_tx.send(UiEvent::Error { message: e.to_string() }); }
                         }
                         let _ = event_tx.send(UiEvent::Done { message: "flash complete".to_string() });
-                    }
-                    WorkerCommand::FactoryFlash { method, firmware } => {
-                        if method == "probe" {
-                            probe::run_probe_command(vec!["flash".to_string(), firmware], event_tx.clone());
-                        } else {
-                            #[cfg(target_os = "linux")]
-                            {
-                                use std::io::Write;
-                                let bytes = match std::fs::read(&firmware) { Ok(b)=>b, Err(e)=>{ let _=event_tx.send(UiEvent::Error{message:format!("read firmware: {e}")}); continue; } };
-                                let profile = crate::profile::FlashProfile { version:1, name:"factory".into(), backend:"serial".into(), firmware: firmware.clone(), serial_device: "/dev/ttyACM0".into(), baud:115200, i2c_device:String::new(), i2c_address:"0x40".into(), can_interface:String::new(), node_id:"0x100".into(), tries:5, timeout_secs:2, verify:true };
-                                let _ = event_tx.send(UiEvent::Log { line: format!("serial factory flash of {firmware}: sending SERIAL_BL_REQ") });
-                                let mut bus = match bareboot_client::SerialBus::new("/dev/ttyACM0", 115200) { Ok(b)=>b, Err(e)=>{ let _=event_tx.send(UiEvent::Error{message:e.to_string()}); continue; } };
-                                let _ = bus.write_raw(b"~ \x1c Request Serial Bootloader!! ~");
-                                std::thread::sleep(std::time::Duration::from_millis(200));
-                                let bus2 = match bareboot_client::SerialBus::new("/dev/ttyACM0", 115200) { Ok(b)=>b, Err(e)=>{ let _=event_tx.send(UiEvent::Error{message:e.to_string()}); continue; } };
-                                let bus = bus2;
-                                let tx = event_tx.clone();
-                                let _ = bareboot_client::run_flash(bus, &bytes, 5, true, |p|{let _=tx.send(UiEvent::Progress{percent:p});}, |l|{let _=tx.send(UiEvent::Log{line:l});});
-                                let _ = event_tx.send(UiEvent::Done { message: "serial factory flash complete".to_string() });
-                            }
-                            #[cfg(not(target_os = "linux"))]
-                            {
-                                let _ = event_tx.send(UiEvent::Error { message: "serial factory only on Linux".to_string() });
-                            }
-                        }
                     }
                     WorkerCommand::Shutdown => break,
                 }

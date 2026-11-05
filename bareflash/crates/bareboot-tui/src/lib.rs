@@ -4,5 +4,7 @@ pub mod form;
 pub mod overlay;
 pub mod profile;
 pub mod probe;
+pub mod protocol;
 pub mod theme;
+pub mod ui;
 pub mod worker;

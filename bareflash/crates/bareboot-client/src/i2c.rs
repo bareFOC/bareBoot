@@ -51,6 +51,15 @@ impl I2cBus {
 
         Ok(Self { file, timeout })
     }
+
+    pub fn request_bootloader(device: &str, address: u8) -> Result<(), HostError> {
+        let mut bus = Self::new(device, address, Duration::from_millis(100))?;
+        use std::io::Write;
+        let _ = bus.file.write(&[bareboot_protocol::I2C_CMD_ENTER_BOOTLOADER]);
+        let _ = bus.file.flush();
+        std::thread::sleep(Duration::from_millis(100));
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]

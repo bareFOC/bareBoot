@@ -63,6 +63,34 @@ impl SocketCanBus {
 
         Ok(Self { fd, node_id })
     }
+
+    pub fn send_frame_raw(&self, can_id: u32, data: &[u8]) -> Result<(), HostError> {
+        let mut cf: libc::can_frame = unsafe { std::mem::zeroed() };
+        cf.can_id = can_id;
+        cf.can_dlc = data.len().min(8) as u8;
+        cf.data[..cf.can_dlc as usize].copy_from_slice(&data[..cf.can_dlc as usize]);
+        let written = unsafe {
+            libc::write(
+                self.fd,
+                &cf as *const libc::can_frame as *const libc::c_void,
+                std::mem::size_of::<libc::can_frame>(),
+            )
+        };
+        if written < 0 {
+            return Err(HostError("CAN write failed".to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn request_bootloader_uuid(ifname: &str, uuid: &[u8; 6]) -> Result<(), HostError> {
+        let bus = Self::new(ifname, bareboot_protocol::CAN_ADMIN_REBOOT_ID)?;
+        let mut frame_data = [0u8; 7];
+        frame_data[0] = bareboot_protocol::CAN_CMD_REBOOT;
+        frame_data[1..7].copy_from_slice(uuid);
+        bus.send_frame_raw(bareboot_protocol::CAN_ADMIN_REBOOT_ID, &frame_data)?;
+        std::thread::sleep(Duration::from_millis(150));
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]

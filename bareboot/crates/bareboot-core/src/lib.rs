@@ -75,6 +75,20 @@ pub fn connect_command() -> u8 {
     commands::CONNECT
 }
 
+/// Inspect the SRAM mailbox at `mailbox_addr`.
+/// If it matches `bareboot_protocol::REQUEST_BOOTLOADER`, clears the mailbox and returns `true`.
+pub fn check_and_clear_bootloader_request(mailbox_addr: usize) -> bool {
+    let ptr = mailbox_addr as *mut u64;
+    unsafe {
+        if core::ptr::read_volatile(ptr) == bareboot_protocol::REQUEST_BOOTLOADER {
+            core::ptr::write_volatile(ptr, 0);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 
 pub mod writer;
 pub use writer::PagedWriter;
@@ -97,6 +111,21 @@ mod tests {
         let mut a = Arbiter::new(300);
         a.expire();
         assert_eq!(a.active, ActiveInterface::Locked);
+    }
+
+    #[test]
+    fn test_mailbox_request_check() {
+        let mut mailbox = 0u64;
+        let addr = (&raw mut mailbox) as usize;
+
+        assert!(!check_and_clear_bootloader_request(addr));
+        assert_eq!(mailbox, 0);
+
+        mailbox = bareboot_protocol::REQUEST_BOOTLOADER;
+        assert!(check_and_clear_bootloader_request(addr));
+        assert_eq!(mailbox, 0);
+
+        assert!(!check_and_clear_bootloader_request(addr));
     }
 }
 

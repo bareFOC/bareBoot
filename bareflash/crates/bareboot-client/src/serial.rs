@@ -24,6 +24,33 @@ impl SerialBus {
         Ok(())
     }
 
+    pub fn touch_1200_baud(device: &str) -> Result<(), HostError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(device)
+            .map_err(|e| HostError(format!("failed to open {device}: {e}")))?;
+        let fd = file.as_raw_fd();
+        unsafe {
+            let mut termios: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut termios) == 0 {
+                libc::cfsetispeed(&mut termios, libc::B1200);
+                libc::cfsetospeed(&mut termios, libc::B1200);
+                libc::tcsetattr(fd, libc::TCSANOW, &termios);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        drop(file);
+        Ok(())
+    }
+
+    pub fn request_serial_bootloader(device: &str, baud: u32) -> Result<(), HostError> {
+        let mut bus = Self::new(device, baud)?;
+        bus.write_raw(bareboot_protocol::SERIAL_BL_REQ)?;
+        std::thread::sleep(Duration::from_millis(100));
+        Ok(())
+    }
+
     pub fn new(device: &str, baud: u32) -> Result<Self, HostError> {
         let file = OpenOptions::new()
             .read(true)
