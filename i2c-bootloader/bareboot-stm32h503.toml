@@ -1,0 +1,9 @@
+target = "stm32h503"
+mcu = "stm32h503kb"
+system_clock_hz = 64000000
+flash_size = 131072
+ram_size = 32768
+app_base = 0x08002000
+boot_window_ms = 5000
+transports = ["i2c"]
+i2c_target_address = 0x40

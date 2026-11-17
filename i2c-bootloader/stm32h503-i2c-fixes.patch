@@ -1,0 +1,50 @@
+diff --git a/bareboot-stm32h503.toml b/bareboot-stm32h503.toml
+index b759456..d9c24fc 100644
+--- a/bareboot-stm32h503.toml
++++ b/bareboot-stm32h503.toml
+@@ -3,7 +3,7 @@ mcu = "stm32h503kb"
+ system_clock_hz = 64000000
+ flash_size = 131072
+ ram_size = 32768
+-app_base = 0x08004000
+-boot_window_ms = 3000
++app_base = 0x08002000
++boot_window_ms = 5000
+ transports = ["i2c"]
+ i2c_target_address = 0x40
+\ No newline at end of file
+diff --git a/bareboot/targets/bareboot-stm32h503/src/main.rs b/bareboot/targets/bareboot-stm32h503/src/main.rs
+index f4ca30f..ca14a9e 100644
+--- a/bareboot/targets/bareboot-stm32h503/src/main.rs
++++ b/bareboot/targets/bareboot-stm32h503/src/main.rs
+@@ -36,7 +36,11 @@ impl FlashTarget for H503Flash {
+     fn app_base(&self) -> u32 { APP_BASE }
+ 
+     fn erase_page(&mut self, addr: u32) -> Result<(), CoreError> {
+-        let sector = ((addr - 0x0800_0000) / 8192) as u8;
++        // STM32H503 has two 64 KiB banks. SNB is a 3-bit field (sector 0..7
++        // within a bank) and BKSEL (NSCR bit 31) selects the physical bank.
++        let offset = addr - 0x0800_0000;
++        let bank2 = offset >= 0x1_0000;
++        let sector = (((offset % 0x1_0000) / 8192) as u8) & 0x07;
+         Self::wait_ready();
+         stm32_metapac::FLASH.nsccr().write(|w| {
+             w.set_clr_eop(true);
+@@ -50,6 +54,7 @@ impl FlashTarget for H503Flash {
+         stm32_metapac::FLASH.nscr().write(|w| {
+             w.set_ser(true);
+             w.set_snb(sector);
++            w.set_bksel(if bank2 { stm32_metapac::flash::vals::Bksel::BANK2 } else { stm32_metapac::flash::vals::Bksel::BANK1 });
+         });
+         stm32_metapac::FLASH.nscr().modify(|w| {
+             w.set_strt(true);
+@@ -367,6 +372,9 @@ fn main() -> ! {
+                 core::ptr::write_volatile(core::ptr::addr_of_mut!(I2C_STOP_RECEIVED), false);
+                 let rpos = core::ptr::read_volatile(core::ptr::addr_of!(I2C_RX_POS));
+                 if rpos > 0 {
++                    // Any bus activity keeps the bootloader alive so a long
++                    // multi-block update cannot be cut short by the boot window.
++                    elapsed_ms = 0;
+                     for i in 0..rpos.min(rx.len()) {
+                         rx[i] = I2C_RX_BUF[i];
+                     }
