@@ -50,8 +50,10 @@ def dap(b):
 def rst(low): return dap([0x10,0x00 if low else 0x80,0x80,0,0,0,0])[:4].hex()
 print("reset:",rst(True),rst(False)); f.close()
 
-xfer_write("F0")
-p,r=exchange(0x11,wait=0.05,rd=64)
+# NOTE: no raw 0xF0 strobe here. Entry is via hardware nRST within the
+# boot window; a raw F0 byte is not a framed Katapult command and leaves
+# the Katapult console's TX staging in an inconsistent state.
+p,r=exchange(0x11,wait=0.05,rd=128)
 if not p or p["cmd"]!=0xA0:
     print("CONNECT FAILED",p,r); sys.exit(1)
 pl=p["payload"]

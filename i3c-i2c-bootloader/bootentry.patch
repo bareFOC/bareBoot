@@ -1,0 +1,14 @@
+--- ref/katapult/src/bootentry.c	2026-10-20 17:36:33.996958902 +0530
++++ i3c-i2c-bootloader/bootentry.c	2026-11-18 11:51:34.785526547 +0530
+@@ -89,8 +89,9 @@
+         boot_window_active = 0;
+         return 1;
+     }
+-    // Valid application present: start bootloader with 250ms window
++    // Valid application present: start bootloader with a generous window
++    // so an HTTP-driven host can always CONNECT before the app takes over.
+     boot_window_active = 1;
+-    boot_window_end = timer_read_time() + timer_from_us(250000);
++    boot_window_end = timer_read_time() + timer_from_us(5000000);
+     return 1;
+ }

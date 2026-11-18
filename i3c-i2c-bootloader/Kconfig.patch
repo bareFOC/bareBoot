@@ -1,0 +1,29 @@
+--- ref/katapult/src/stm32/Kconfig	2026-11-11 17:34:30.459729317 +0530
++++ /tmp/opencode/katapult-i3c/src/stm32/Kconfig	2026-11-18 11:16:42.594516432 +0530
+@@ -434,6 +434,10 @@
+         bool "I3C with I2C fallback (auto-detect on PB6/PB7)"
+         depends on MACH_STM32H5
+         select STM32_I3C_DYNAMIC_TARGET
++    config STM32_I3C1_DYNAMIC_PB3_PB4
++        bool "I3C with I2C fallback (auto-detect on PB3/PB4 - N20 Servo Host)"
++        depends on MACH_STM32H5
++        select STM32_I3C_DYNAMIC_TARGET
+     config STM32_I2C1_PB6_PB7
+         bool "I2C (on I2C1 PB6/PB7)"
+         select STM32_I2C_TARGET
+@@ -455,13 +459,13 @@
+     bool
+ 
+ config I2C_TARGET_ADDRESS
+-    hex "I2C target address" if STM32_I2C1_PB6_PB7 || STM32_I3C1_DYNAMIC_PB6_PB7
++    hex "I2C target address" if STM32_I2C1_PB6_PB7 || STM32_I3C1_DYNAMIC_PB6_PB7 || STM32_I3C1_DYNAMIC_PB3_PB4
+     default 0x30
+     help
+         Specify the 7-bit I2C target address (e.g. 0x30).
+ 
+ config I3C_STATIC_ADDRESS
+-    hex "I3C static / device address" if STM32_I3C1_PB6_PB7 || STM32_I3C1_DYNAMIC_PB6_PB7 || STM32_I3C1_PB3_PB4
++    hex "I3C static / device address" if STM32_I3C1_PB6_PB7 || STM32_I3C1_DYNAMIC_PB6_PB7 || STM32_I3C1_PB3_PB4 || STM32_I3C1_DYNAMIC_PB3_PB4
+     default 0x40
+     help
+         Specify the 7-bit static/device address for I3C (e.g. 0x30).

@@ -1,0 +1,222 @@
+--- ref/katapult/src/stm32/i3c_dynamic_target.c	2026-10-21 19:22:38.641872759 +0530
++++ i3c-i2c-bootloader/i3c_dynamic_target.c	2026-11-18 11:51:34.784256687 +0530
+@@ -1,7 +1,7 @@
+ // STM32 I3C target with dynamic I2C fallback driver for Katapult
+ //
+ // Automatically detects standard I2C flasher (address 0x30) or
+-// I3C Controller broadcast (address 0x7E) on PB6/PB7 and switches dynamically.
++// I3C Controller broadcast (address 0x7E) on PB6/PB7 or PB3/PB4 and switches dynamically.
+ //
+ // This file may be distributed under the terms of the GNU GPLv3 license.
+ 
+@@ -20,14 +20,26 @@
+ #define RX_BUFFER_SIZE 192
+ #define TX_BUFFER_SIZE 128
+ 
++#if CONFIG_STM32_I3C1_DYNAMIC_PB3_PB4
++DECL_CONSTANT_STR("RESERVE_PINS_i2c_i3c", "PB3,PB4");
++#define GPIO_SCL GPIO('B', 3)
++#define GPIO_SDA GPIO('B', 4)
++#define I2C_PERIPH I2C2
++#define I2C_EV_IRQn I2C2_EV_IRQn
++#define I2C_ER_IRQn I2C2_ER_IRQn
++#define I2C_AF (GPIO_FUNCTION(8) | GPIO_OPEN_DRAIN)
++#else
+ DECL_CONSTANT_STR("RESERVE_PINS_i2c_i3c", "PB6,PB7");
+-DECL_CONSTANT("I2C_TARGET_ADDRESS", CONFIG_I2C_TARGET_ADDRESS);
+-DECL_CONSTANT("I3C_STATIC_ADDRESS", CONFIG_I3C_STATIC_ADDRESS);
+-DECL_CONSTANT("RECEIVE_WINDOW", RX_BUFFER_SIZE);
+-
+ #define GPIO_SCL GPIO('B', 6)
+ #define GPIO_SDA GPIO('B', 7)
++#define I2C_PERIPH I2C1
++#define I2C_EV_IRQn I2C1_EV_IRQn
++#define I2C_ER_IRQn I2C1_ER_IRQn
+ #define I2C_AF (GPIO_FUNCTION(4) | GPIO_OPEN_DRAIN)
++#endif
++DECL_CONSTANT("I2C_TARGET_ADDRESS", CONFIG_I2C_TARGET_ADDRESS);
++DECL_CONSTANT("I3C_STATIC_ADDRESS", CONFIG_I3C_STATIC_ADDRESS);
++DECL_CONSTANT("RECEIVE_WINDOW", RX_BUFFER_SIZE);
+ #define I3C_AF (GPIO_FUNCTION(3) | GPIO_OPEN_DRAIN)
+ 
+ #define MODE_I2C 0
+@@ -54,40 +66,40 @@
+ void
+ I2C1_EV_IRQHandler(void)
+ {
+-    uint32_t isr = I2C1->ISR;
++    uint32_t isr = I2C_PERIPH->ISR;
+ 
+     // Address matched interrupt
+     if (isr & I2C_ISR_ADDR) {
+         uint8_t addcode = (isr & I2C_ISR_ADDCODE_Msk) >> 17;
+         if (addcode == 0x7E) {
+             // I3C Controller broadcast (0x7E) detected: switch pins to I3C1!
+-            I2C1->ICR = I2C_ICR_ADDRCF;
++            I2C_PERIPH->ICR = I2C_ICR_ADDRCF;
+             switch_to_i3c();
+             return;
+         }
+ 
+         // Clear standard address match flag
+-        I2C1->ICR = I2C_ICR_ADDRCF;
++        I2C_PERIPH->ICR = I2C_ICR_ADDRCF;
+ 
+         if (isr & I2C_ISR_DIR) {
+             // Master read (slave transmit)
+             uint8_t tpos = readb(&transmit_pos);
+             uint8_t tmax = readb(&transmit_max);
+             if (tpos < tmax) {
+-                I2C1->CR1 |= I2C_CR1_TXIE;
++                I2C_PERIPH->CR1 |= I2C_CR1_TXIE;
+             } else {
+-                I2C1->CR1 &= ~I2C_CR1_TXIE;
++                I2C_PERIPH->CR1 &= ~I2C_CR1_TXIE;
+             }
+         } else {
+             // Master write (slave receive)
+-            I2C1->CR1 &= ~I2C_CR1_TXIE;
+-            I2C1->ISR = I2C_ISR_TXE;
++            I2C_PERIPH->CR1 &= ~I2C_CR1_TXIE;
++            I2C_PERIPH->ISR = I2C_ISR_TXE;
+         }
+     }
+ 
+     // Byte received from master
+     if (isr & I2C_ISR_RXNE) {
+-        uint8_t data = I2C1->RXDR;
++        uint8_t data = I2C_PERIPH->RXDR;
+         uint8_t rpos = readb(&receive_pos);
+         if (rpos < sizeof(receive_buf)) {
+             receive_buf[rpos] = data;
+@@ -96,29 +108,29 @@
+     }
+ 
+     // Transmit data register empty
+-    if ((isr & I2C_ISR_TXIS) && (I2C1->CR1 & I2C_CR1_TXIE)) {
++    if ((isr & I2C_ISR_TXIS) && (I2C_PERIPH->CR1 & I2C_CR1_TXIE)) {
+         uint8_t tpos = readb(&transmit_pos);
+         uint8_t tmax = readb(&transmit_max);
+         if (tpos < tmax) {
+-            I2C1->TXDR = transmit_buf[tpos];
++            I2C_PERIPH->TXDR = transmit_buf[tpos];
+             writeb(&transmit_pos, tpos + 1);
+         } else {
+-            I2C1->TXDR = 0xFF;
++            I2C_PERIPH->TXDR = 0xFF;
+         }
+     }
+ 
+     // Master NACK received
+     if (isr & I2C_ISR_NACKF) {
+-        I2C1->ICR = I2C_ICR_NACKCF;
+-        I2C1->CR1 &= ~I2C_CR1_TXIE;
+-        I2C1->ISR = I2C_ISR_TXE;
++        I2C_PERIPH->ICR = I2C_ICR_NACKCF;
++        I2C_PERIPH->CR1 &= ~I2C_CR1_TXIE;
++        I2C_PERIPH->ISR = I2C_ISR_TXE;
+     }
+ 
+     // STOP condition detected
+     if (isr & I2C_ISR_STOPF) {
+-        I2C1->ICR = I2C_ICR_STOPCF;
+-        I2C1->CR1 &= ~I2C_CR1_TXIE;
+-        I2C1->ISR = I2C_ISR_TXE;
++        I2C_PERIPH->ICR = I2C_ICR_STOPCF;
++        I2C_PERIPH->CR1 &= ~I2C_CR1_TXIE;
++        I2C_PERIPH->ISR = I2C_ISR_TXE;
+         sched_wake_tasks();
+     }
+ }
+@@ -126,13 +138,13 @@
+ void
+ I2C1_ER_IRQHandler(void)
+ {
+-    uint32_t isr = I2C1->ISR;
++    uint32_t isr = I2C_PERIPH->ISR;
+     if (isr & I2C_ISR_BERR)
+-        I2C1->ICR = I2C_ICR_BERRCF;
++        I2C_PERIPH->ICR = I2C_ICR_BERRCF;
+     if (isr & I2C_ISR_ARLO)
+-        I2C1->ICR = I2C_ICR_ARLOCF;
++        I2C_PERIPH->ICR = I2C_ICR_ARLOCF;
+     if (isr & I2C_ISR_OVR)
+-        I2C1->ICR = I2C_ICR_OVRCF;
++        I2C_PERIPH->ICR = I2C_ICR_OVRCF;
+ }
+ 
+ // ---------------------------------------------------------
+@@ -202,9 +214,9 @@
+     active_mode = MODE_I3C;
+ 
+     // Disable I2C1
+-    I2C1->CR1 = 0;
+-    NVIC_DisableIRQ(I2C1_EV_IRQn);
+-    NVIC_DisableIRQ(I2C1_ER_IRQn);
++    I2C_PERIPH->CR1 = 0;
++    NVIC_DisableIRQ(I2C_EV_IRQn);
++    NVIC_DisableIRQ(I2C_ER_IRQn);
+ 
+     // Switch PB6 and PB7 to AF3 (I3C1)
+     gpio_peripheral(GPIO_SCL, I3C_AF, 1);
+@@ -291,7 +303,7 @@
+         if (tmax + max_size - tpos > sizeof(transmit_buf))
+             return;
+         if (active_mode == MODE_I2C)
+-            I2C1->CR1 &= ~I2C_CR1_TXIE;
++            I2C_PERIPH->CR1 &= ~I2C_CR1_TXIE;
+         else
+             I3C1->IER &= ~I3C_IER_TXFNFIE;
+         tpos = readb(&transmit_pos);
+@@ -307,8 +319,8 @@
+ 
+     if (active_mode == MODE_I2C) {
+         irqstatus_t flag = irq_save();
+-        if ((I2C1->ISR & I2C_ISR_DIR) && (I2C1->ISR & I2C_ISR_TXIS)) {
+-            I2C1->CR1 |= I2C_CR1_TXIE;
++        if ((I2C_PERIPH->ISR & I2C_ISR_DIR) && (I2C_PERIPH->ISR & I2C_ISR_TXIS)) {
++            I2C_PERIPH->CR1 |= I2C_CR1_TXIE;
+         }
+         irq_restore(flag);
+     } else {
+@@ -325,29 +337,29 @@
+ void
+ i3c_dynamic_target_init(void)
+ {
+-    enable_pclock((uint32_t)I2C1);
++    enable_pclock((uint32_t)I2C_PERIPH);
+     enable_pclock((uint32_t)I3C1);
+ 
+-    // Start in I2C mode on PB6/PB7
++    // Start in I2C mode
+     active_mode = MODE_I2C;
+ 
+-    I2C1->CR1 = 0;
+-    I2C1->TIMINGR = 0x10420F13; // 400 kHz fast-mode
++    I2C_PERIPH->CR1 = 0;
++    I2C_PERIPH->TIMINGR = 0x10420F13; // 400 kHz fast-mode
+ 
+     // OAR1: Target Address (e.g. 0x30)
+-    I2C1->OAR1 = I2C_OAR1_OA1EN | ((CONFIG_I2C_TARGET_ADDRESS & 0x7F) << 1);
++    I2C_PERIPH->OAR1 = I2C_OAR1_OA1EN | ((CONFIG_I2C_TARGET_ADDRESS & 0x7F) << 1);
+ 
+     // OAR2: I3C Broadcast Address (0x7E)
+-    I2C1->OAR2 = I2C_OAR2_OA2EN | (0x7E << 1);
++    I2C_PERIPH->OAR2 = I2C_OAR2_OA2EN | (0x7E << 1);
+ 
+-    I2C1->ICR = 0xFFFFFFFF;
+-    I2C1->CR1 = I2C_CR1_PE | I2C_CR1_RXIE | I2C_CR1_ADDRIE |
++    I2C_PERIPH->ICR = 0xFFFFFFFF;
++    I2C_PERIPH->CR1 = I2C_CR1_PE | I2C_CR1_RXIE | I2C_CR1_ADDRIE |
+                 I2C_CR1_STOPIE | I2C_CR1_NACKIE | I2C_CR1_ERRIE;
+ 
+-    armcm_enable_irq(I2C1_EV_IRQHandler, I2C1_EV_IRQn, 0);
+-    armcm_enable_irq(I2C1_ER_IRQHandler, I2C1_ER_IRQn, 0);
++    armcm_enable_irq(I2C1_EV_IRQHandler, I2C_EV_IRQn, 0);
++    armcm_enable_irq(I2C1_ER_IRQHandler, I2C_ER_IRQn, 0);
+ 
+-    // Configure PB6 and PB7 as AF4 (I2C1) initially
++    // Configure pins for I2C target mode initially
+     gpio_peripheral(GPIO_SCL, I2C_AF, 1);
+     gpio_peripheral(GPIO_SDA, I2C_AF, 1);
+ }
