@@ -43,12 +43,15 @@ def post(path, payload):
 
 
 def crc16(data):
-    c = 0xffff
-    for d in data:
-        v = d ^ (c & 0xff); v ^= (v << 4) & 0xff
-        c = (((v << 8) | (c >> 8)) ^ (v >> 4) ^ (v >> 3)) & 0xffff
-    return c
-
+    # CRC16-CCITT (Katapult/BareBoot). Compute without the
+    # `v = d ^ (c & 0xff); v ^= (v << 4) & 0xff` pattern, which CPython 3.14
+    # miscompiles via a combined STORE_FAST_LOAD_FAST operation.
+    crc = 0xffff
+    for byte in data:
+        tmp = byte ^ (crc & 0xff)
+        tmp = (tmp ^ ((tmp << 4) & 0xff)) & 0xff
+        crc = ((crc >> 8) ^ (tmp << 8) ^ (tmp >> 4) ^ (tmp << 3)) & 0xffff
+    return crc
 
 def frame(cmd, payload=b''):
     assert len(payload) % 4 == 0
