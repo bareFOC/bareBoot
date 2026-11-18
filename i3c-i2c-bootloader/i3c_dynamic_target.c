@@ -13,6 +13,7 @@
 #include "board/misc.h" // console_sendf
 #include "board/pgm.h" // READP
 #include "bootentry.h" // bootentry_cancel_timeout
+#include "canboot.h" // set_bootup_code, REQUEST_CANBOOT
 #include "command.h" // DECL_CONSTANT, command_find_block, command_dispatch, etc.
 #include "internal.h" // enable_pclock, gpio_peripheral, GPIO, GPIO_FUNCTION, GPIO_OPEN_DRAIN
 #include "sched.h" // DECL_INIT, DECL_TASK, sched_wake_tasks
@@ -50,6 +51,11 @@ DECL_CONSTANT("RECEIVE_WINDOW", RX_BUFFER_SIZE);
 #define CCC_DIRECT_RSTDAA  0x06
 #define CCC_BCAST_ENTDAA   0x07
 #define CCC_DIRECT_SETDASA 0x87
+#define CCC_BCAST_RSTACT   0x2A
+#define CCC_DIRECT_RSTACT  0x9A
+// The MIPI direct form of RSTACT is (0x2A | 0x80); accept it as well.
+#define CCC_DIRECT_RSTACT_ALT 0xAA
+#define RSTACT_DEF_TGT_RESET 0x02 // defining byte: Target System Reset
 
 static volatile uint8_t active_mode = MODE_I2C;
 static uint8_t receive_buf[RX_BUFFER_SIZE];
@@ -57,6 +63,10 @@ static uint8_t receive_pos;
 static uint8_t transmit_buf[TX_BUFFER_SIZE];
 static uint8_t transmit_pos;
 static uint8_t transmit_max;
+// One-shot RSTACT detector: RMR holds the CCC code, its defining byte
+// arrives in the RX FIFO and is consumed in I3C1_EV_IRQHandler().
+static volatile uint8_t rstact_pending;
+static uint8_t last_ccc_code;
 
 static void switch_to_i3c(void);
 
@@ -160,16 +170,40 @@ I3C1_EV_IRQHandler(void)
         I3C1->CEVR = I3C_CEVR_CDAUPDF;
     }
 
-    // CCC Command handler (RSTDAA)
+    // CCC Command handler (RSTDAA and RSTACT)
     uint32_t rmr = I3C1->RMR;
     uint8_t ccc_code = (rmr & I3C_RMR_RCODE_Msk) >> I3C_RMR_RCODE_Pos;
     if (ccc_code == CCC_DIRECT_RSTDAA) {
         I3C1->DEVR0 &= ~I3C_DEVR0_DAVAL;
     }
+    // RSTACT carries a defining byte in the RX FIFO.  Arm a one-shot
+    // detector only when RMR first shows the RSTACT code, so a stale RMR
+    // value on later, unrelated traffic cannot spuriously reset the board.
+    if (ccc_code != last_ccc_code) {
+        last_ccc_code = ccc_code;
+        if (ccc_code == CCC_BCAST_RSTACT || ccc_code == CCC_DIRECT_RSTACT
+            || ccc_code == CCC_DIRECT_RSTACT_ALT)
+            rstact_pending = 1;
+        else
+            rstact_pending = 0;
+    }
 
     // Receive data from I3C master
     while (I3C1->EVR & I3C_EVR_RXFNEF) {
         uint8_t data = I3C1->RDR & 0xFF;
+        if (rstact_pending) {
+            // First byte after RSTACT is its defining byte; do not feed it
+            // to the command stream.
+            rstact_pending = 0;
+            if (data == RSTACT_DEF_TGT_RESET) {
+                // Keep the bootloader resident across the system reset:
+                // the mailbox at the initial SP is checked after reboot.
+                set_bootup_code(REQUEST_CANBOOT);
+                irq_disable();
+                NVIC_SystemReset();
+            }
+            continue;
+        }
         uint8_t rpos = readb(&receive_pos);
         if (rpos < sizeof(receive_buf)) {
             receive_buf[rpos] = data;
