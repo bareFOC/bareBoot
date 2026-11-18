@@ -6,7 +6,7 @@ license.workspace = true
 description = "Headless Katapult-compatible flashing engine"
 
 [dependencies]
-bareboot-protocol = { path = "../../../bareboot/crates/bareboot-protocol" }
+bareboot-protocol = { path = "../../crates/bareboot-protocol" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 

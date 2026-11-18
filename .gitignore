@@ -10,12 +10,8 @@ test-*/
 # build outputs
 out/
 target/
-/targets/
-!/targets/
-!/targets/bareboot-rp2350/
-!/targets/bareboot-rp2350/**
+**/target/
 
 # Python cache
 __pycache__/
 *.pyc
-targets/bareboot-rp2350/target/

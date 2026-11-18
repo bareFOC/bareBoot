@@ -15,8 +15,8 @@ test = false
 bench = false
 
 [dependencies]
-bareboot-core = { path = "../../bareboot/crates/bareboot-core" }
-bareboot-protocol = { path = "../../bareboot/crates/bareboot-protocol" }
+bareboot-core = { path = "../../crates/bareboot-core" }
+bareboot-protocol = { path = "../../crates/bareboot-protocol" }
 
 # Hardware-only dependencies are ARM-only so `cargo test` can run the pure
 # boot-decision helpers on the host without pulling in ARM inline assembly.

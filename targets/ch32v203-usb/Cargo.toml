@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bareboot-core = { path = "../bareboot/crates/bareboot-core" }
-bareboot-protocol = { path = "../bareboot/crates/bareboot-protocol" }
-ch32-hal = { path = "../ref/ch32-hal", features = ["ch32v203c8t6","rt","embassy","exti","memory-x"], default-features = false }
+bareboot-core = { path = "../../crates/bareboot-core" }
+bareboot-protocol = { path = "../../crates/bareboot-protocol" }
+ch32-hal = { path = "../../ref/ch32-hal", features = ["ch32v203c8t6","rt","embassy","exti","memory-x"], default-features = false }
 embassy-executor = { version = "0.10.0", features = ["platform-riscv32", "executor-thread"] }
 embassy-time = "0.5.1"
 embassy-futures = { version = "0.1.2" }

@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bareboot-core = { path = "../bareboot/crates/bareboot-core" }
-bareboot-protocol = { path = "../bareboot/crates/bareboot-protocol" }
+bareboot-core = { path = "../../crates/bareboot-core" }
+bareboot-protocol = { path = "../../crates/bareboot-protocol" }
 cortex-m-rt = "0.7"
 panic-halt = "0.2"
 
