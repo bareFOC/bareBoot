@@ -348,3 +348,59 @@ bareboot-cli --firmware app.bin --i3c /dev/i3c-0 --address 0x40 --request-bootlo
 # 5. CAN Bus (Admin frame to UUID 123456789abc)
 bareboot-cli --firmware app.bin --can can0 --node-id 0x100 --uuid 123456789abc --request-bootloader
 ```
+
+---
+
+## 6. Application-Side Trigger Robustness (IMPORTANT)
+
+The single most important implementation detail for handsfree entry is **where the
+trigger is detected**. The application firmware must recognize the `0xF0` strobe in
+**interrupt context**, not in a polled/cooperative task.
+
+Rationale: on cooperative executors (e.g. Embassy without an interrupt executor), a
+busy background task can starve the task that services the I2C target. If the `0xF0`
+handler runs at task level, the strobe is silently missed whenever the I2C target task
+is not scheduled, and the host falls back to needing a hardware reset — defeating the
+purpose of handsfree entry. An interrupt handler preempts a non-yielding task (provided
+interrupts remain enabled), making entry deterministic.
+
+Requirements for the application:
+- Decode the strobe at the I2C peripheral interrupt level (e.g. an `I2C2_EV` handler or
+  an I2C target task running on an interrupt executor).
+- Detect exactly a one-byte write `[0xF0]` to the target address; do not consume bytes
+  belonging to normal register traffic.
+- On match: write `REQUEST_CANBOOT` (`0x5984E3FA6CA1589B`) to the mailbox derived from
+  the bootloader's initial SP (`bl_vectors[0]` at `CONFIG_FLASH_BOOT_ADDRESS`), then
+  issue a system reset. Do not hardcode the mailbox address — use the bootloader's
+  stack pointer so the contract survives bootloader layout changes.
+- Do not occupy an application register (e.g. a command register at `0xF0`) for this
+  purpose; that keeps the trigger in task context and couples bootloader entry to the
+  register server's health.
+
+---
+
+## 7. STM32H503 / AgentLA Implementation Notes (Nov 2026)
+
+The validated deployment for this board uses the following concrete contract:
+
+- **Physical bus**: STM32H503 I2C2 on PB3 (SCL) / PB4 (SDA), 7-bit address `0x40`.
+  On the AgentLA (RP2350) host the flexible pins are **GP10 = SDA, GP11 = SCL**.
+  (Note: some early docs listed GP10 as SCL; hardware measurement confirmed
+  GP10=SDA / GP11=SCL is the correct order.)
+- **Bootloader**: Katapult dynamic-target build (`i3c-i2c-bootloader`) — starts in I2C
+  mode at `0x40`, auto-switches to I3C on a broadcast `0x7E`, and now also handles
+  CCC `RSTACT` defining byte `0x02` as a hardware-level entry trigger.
+- **Handsfree entry (I2C)**: host writes a single raw byte `0xF0` to `0x40`. The
+  application's ISR-level handler writes the boot cookie and resets. The tool
+  `i2c-bootloader/flash_app_over_i2c.py` is fully in-band — no nRST line and no debug
+  probe are required. It attempts CONNECT first, then emits the `0xF0` strobe and
+  retries CONNECT while the application resets.
+- **Handsfree entry (I3C)**: either a raw `0xF0` byte to the assigned address or CCC
+  `RSTACT` (`0x2A` broadcast / `0x9A` direct, defining byte `0x02`).
+- **Update flow**: CONNECT (`0x11`) -> RX_BLOCK (`0x12`, 64-byte blocks, CCITT CRC16)
+  -> RX_EOF (`0x13`) -> COMPLETE (`0x15`), with optional REQ_BLOCK (`0x14`) readback
+  verification. Boot window is 5 s; any valid frame cancels the auto-boot timer.
+
+Residual limitation: no SDA/SCL-only method can recover an application that has
+interrupts globally disabled or is stuck in an unrecoverable fault — there is no entity
+on the bus able to reset the chip. Document this as an accepted hardware limit.
