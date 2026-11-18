@@ -64,7 +64,7 @@ static uint8_t transmit_buf[TX_BUFFER_SIZE];
 static uint8_t transmit_pos;
 static uint8_t transmit_max;
 // One-shot RSTACT detector: RMR holds the CCC code, its defining byte
-// arrives in the RX FIFO and is consumed in I3C1_EV_IRQHandler().
+// arrives in the RX FIFO and is consumed in I3C2_EV_IRQHandler().
 static volatile uint8_t rstact_pending;
 static uint8_t last_ccc_code;
 
@@ -82,7 +82,7 @@ I2C1_EV_IRQHandler(void)
     if (isr & I2C_ISR_ADDR) {
         uint8_t addcode = (isr & I2C_ISR_ADDCODE_Msk) >> 17;
         if (addcode == 0x7E) {
-            // I3C Controller broadcast (0x7E) detected: switch pins to I3C1!
+            // I3C Controller broadcast (0x7E) detected: switch pins to I3C2!
             I2C_PERIPH->ICR = I2C_ICR_ADDRCF;
             switch_to_i3c();
             return;
@@ -158,23 +158,23 @@ I2C1_ER_IRQHandler(void)
 }
 
 // ---------------------------------------------------------
-// I3C1 Interrupt Handlers
+// I3C2 Interrupt Handlers
 // ---------------------------------------------------------
 void
-I3C1_EV_IRQHandler(void)
+I3C2_EV_IRQHandler(void)
 {
-    uint32_t evr = I3C1->EVR;
+    uint32_t evr = I3C2->EVR;
 
     // Dynamic Address Update
     if (evr & I3C_EVR_DAUPDF) {
-        I3C1->CEVR = I3C_CEVR_CDAUPDF;
+        I3C2->CEVR = I3C_CEVR_CDAUPDF;
     }
 
     // CCC Command handler (RSTDAA and RSTACT)
-    uint32_t rmr = I3C1->RMR;
+    uint32_t rmr = I3C2->RMR;
     uint8_t ccc_code = (rmr & I3C_RMR_RCODE_Msk) >> I3C_RMR_RCODE_Pos;
     if (ccc_code == CCC_DIRECT_RSTDAA) {
-        I3C1->DEVR0 &= ~I3C_DEVR0_DAVAL;
+        I3C2->DEVR0 &= ~I3C_DEVR0_DAVAL;
     }
     // RSTACT carries a defining byte in the RX FIFO.  Arm a one-shot
     // detector only when RMR first shows the RSTACT code, so a stale RMR
@@ -189,8 +189,8 @@ I3C1_EV_IRQHandler(void)
     }
 
     // Receive data from I3C master
-    while (I3C1->EVR & I3C_EVR_RXFNEF) {
-        uint8_t data = I3C1->RDR & 0xFF;
+    while (I3C2->EVR & I3C_EVR_RXFNEF) {
+        uint8_t data = I3C2->RDR & 0xFF;
         if (rstact_pending) {
             // First byte after RSTACT is its defining byte; do not feed it
             // to the command stream.
@@ -212,30 +212,30 @@ I3C1_EV_IRQHandler(void)
     }
 
     // Transmit data to I3C master
-    if ((I3C1->EVR & I3C_EVR_TXFNFF) && (I3C1->IER & I3C_IER_TXFNFIE)) {
+    if ((I3C2->EVR & I3C_EVR_TXFNFF) && (I3C2->IER & I3C_IER_TXFNFIE)) {
         uint8_t tpos = readb(&transmit_pos);
         uint8_t tmax = readb(&transmit_max);
         if (tpos < tmax) {
-            I3C1->TDR = transmit_buf[tpos];
+            I3C2->TDR = transmit_buf[tpos];
             writeb(&transmit_pos, tpos + 1);
         } else {
-            I3C1->IER &= ~I3C_IER_TXFNFIE;
+            I3C2->IER &= ~I3C_IER_TXFNFIE;
         }
     }
 
     // Frame Complete or Reception Target End
     if (evr & (I3C_EVR_FCF | I3C_EVR_RXTGTENDF)) {
-        I3C1->CEVR = I3C_CEVR_CFCF | I3C_CEVR_CRXTGTENDF;
+        I3C2->CEVR = I3C_CEVR_CFCF | I3C_CEVR_CRXTGTENDF;
         sched_wake_tasks();
     }
 }
 
 void
-I3C1_ER_IRQHandler(void)
+I3C2_ER_IRQHandler(void)
 {
-    uint32_t evr = I3C1->EVR;
+    uint32_t evr = I3C2->EVR;
     if (evr & I3C_EVR_ERRF) {
-        I3C1->CEVR = I3C_CEVR_CERRF;
+        I3C2->CEVR = I3C_CEVR_CERRF;
     }
 }
 
@@ -252,31 +252,31 @@ switch_to_i3c(void)
     NVIC_DisableIRQ(I2C_EV_IRQn);
     NVIC_DisableIRQ(I2C_ER_IRQn);
 
-    // Switch PB6 and PB7 to AF3 (I3C1)
+    // Switch PB6 and PB7 to AF3 (I3C2)
     gpio_peripheral(GPIO_SCL, I3C_AF, 1);
     gpio_peripheral(GPIO_SDA, I3C_AF, 1);
 
-    // Initialize I3C1 peripheral as Target
-    I3C1->CFGR = 0;
-    I3C1->CFGR = I3C_CFGR_RSTPTRN | I3C_CFGR_EXITPTRN;
-    I3C1->BCR = 0x06;
-    I3C1->DCR = 0x63;
-    I3C1->EPIDR = (0x0114 << 16) | 0x0001;
-    I3C1->DEVR0 = (CONFIG_I3C_STATIC_ADDRESS & 0x7F) << 1;
-    I3C1->MAXRLR = MESSAGE_MAX;
-    I3C1->MAXWLR = MESSAGE_MAX;
-    I3C1->TIMINGR0 = (24 << I3C_TIMINGR0_SCLH_I2C_Pos) |
+    // Initialize I3C2 peripheral as Target (PB3/PB4 AF3 maps to I3C2 on H503)
+    I3C2->CFGR = 0;
+    I3C2->CFGR = I3C_CFGR_RSTPTRN | I3C_CFGR_EXITPTRN;
+    I3C2->BCR = 0x06;
+    I3C2->DCR = 0x63;
+    I3C2->EPIDR = (0x0114 << 16) | 0x0001;
+    I3C2->DEVR0 = (CONFIG_I3C_STATIC_ADDRESS & 0x7F) << 1;
+    I3C2->MAXRLR = MESSAGE_MAX;
+    I3C2->MAXWLR = MESSAGE_MAX;
+    I3C2->TIMINGR0 = (24 << I3C_TIMINGR0_SCLH_I2C_Pos) |
                      (24 << I3C_TIMINGR0_SCLL_OD_Pos) |
                      (3 << I3C_TIMINGR0_SCLH_I3C_Pos) |
                      (3 << I3C_TIMINGR0_SCLL_PP_Pos);
-    I3C1->CEVR = 0xFFFFFFFF;
-    I3C1->IER = I3C_IER_RXFNEIE | I3C_IER_FCIE | I3C_IER_RXTGTENDIE |
+    I3C2->CEVR = 0xFFFFFFFF;
+    I3C2->IER = I3C_IER_RXFNEIE | I3C_IER_FCIE | I3C_IER_RXTGTENDIE |
                 I3C_IER_DAUPDIE | I3C_IER_ERRIE;
 
-    armcm_enable_irq(I3C1_EV_IRQHandler, I3C1_EV_IRQn, 0);
-    armcm_enable_irq(I3C1_ER_IRQHandler, I3C1_ER_IRQn, 0);
+    armcm_enable_irq(I3C2_EV_IRQHandler, I3C2_EV_IRQn, 0);
+    armcm_enable_irq(I3C2_ER_IRQHandler, I3C2_ER_IRQn, 0);
 
-    I3C1->CFGR |= I3C_CFGR_EN;
+    I3C2->CFGR |= I3C_CFGR_EN;
 }
 
 // ---------------------------------------------------------
@@ -339,7 +339,7 @@ console_sendf(const struct command_encoder *ce, va_list args)
         if (active_mode == MODE_I2C)
             I2C_PERIPH->CR1 &= ~I2C_CR1_TXIE;
         else
-            I3C1->IER &= ~I3C_IER_TXFNFIE;
+            I3C2->IER &= ~I3C_IER_TXFNFIE;
         tpos = readb(&transmit_pos);
         tmax -= tpos;
         memmove(&transmit_buf[0], &transmit_buf[tpos], tmax);
@@ -358,9 +358,9 @@ console_sendf(const struct command_encoder *ce, va_list args)
         }
         irq_restore(flag);
     } else {
-        I3C1->TGTTDR = msglen;
+        I3C2->TGTTDR = msglen;
         irqstatus_t flag = irq_save();
-        I3C1->IER |= I3C_IER_TXFNFIE;
+        I3C2->IER |= I3C_IER_TXFNFIE;
         irq_restore(flag);
     }
 }
@@ -372,7 +372,7 @@ void
 i3c_dynamic_target_init(void)
 {
     enable_pclock((uint32_t)I2C_PERIPH);
-    enable_pclock((uint32_t)I3C1);
+    enable_pclock((uint32_t)I3C2);
 
     // Start in I2C mode
     active_mode = MODE_I2C;
