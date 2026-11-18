@@ -9,6 +9,9 @@
 use bareboot_core::dispatch::dispatch_one;
 use bareboot_core::{BootConfig, CoreError, FlashTarget, PagedWriter};
 use bareboot_protocol::{self, commands, FrameParse};
+use bareboot_rp2350::commit_state::{
+    encode_record, read as read_commit, STATE_UPDATE_IN_PROGRESS, STATE_VALID,
+};
 use bareboot_rp2350::{
     mailbox_from_initial_sp, should_enter_recovery, valid_app_vector, APP_BASE, APP_END,
     BOOTLOADER_XIP,
@@ -26,6 +29,28 @@ use embassy_usb::class::cdc_acm::{CdcAcmClass, State as CdcAcmState};
 use embassy_usb::Builder;
 use panic_halt as _;
 use static_cell::StaticCell;
+
+
+/// RP2350 bootrom image definition.
+///
+/// The RP2350 bootrom will not execute a raw XIP image from flash unless the
+/// first 256 bytes contain this signature sequence. Without it the bootrom
+/// falls back to USB boot (BOOTSEL), which production units do not have.
+/// Mirrors ref/katapult/src/rp2040/rpxxxx_link.lds.S.
+///
+/// Placed in the vector table's interrupt section so the linker extends the
+/// vector table with it (within the first 4 KB of flash), where the RP2350
+/// bootrom block-loop scanner finds it. Keeps `_stext` auto-adjusted by
+/// cortex-m-rt, so no manual linker-script address math is needed.
+#[used]
+#[link_section = ".vector_table.interrupts"]
+static IMAGE_DEFINITION: [u32; 5] = [
+    0xffff_ded3,
+    0x1021_0142,
+    0x0000_01ff,
+    0x0000_0000,
+    0xab12_3579,
+];
 
 const FLASH_SIZE: usize = 4 * 1024 * 1024;
 const PAGE_SIZE: usize = 4096;
@@ -92,6 +117,18 @@ impl FlashTarget for RpFlash {
         let offset = Self::checked_offset(addr, data.len())?;
         self.flash
             .blocking_write(offset, data)
+            .map_err(|_| CoreError::Flash)
+    }
+
+    fn write_commit_record(&mut self, record: &[u8]) -> Result<(), CoreError> {
+        // Dedicated commit-state sector at flash offset 0x7000 (the last 4 KB
+        // sector of BareBoot's 32 KB slot), never inside the application slot.
+        const COMMIT_OFFSET: u32 = 0x7000;
+        self.flash
+            .blocking_erase(COMMIT_OFFSET, COMMIT_OFFSET + PAGE_SIZE as u32)
+            .map_err(|_| CoreError::Flash)?;
+        self.flash
+            .blocking_write(COMMIT_OFFSET, record)
             .map_err(|_| CoreError::Flash)
     }
 
@@ -168,11 +205,27 @@ fn app_vector_from_writer<F: FlashTarget, const PAGE: usize>(
     )
 }
 
-fn unrecoverable_fallback() -> ! {
-    embassy_rp::rom_data::reset_to_usb_boot(0, 0);
-    loop {
-        cortex_m::asm::wfi();
+/// Send a Katapult COMMAND_ERROR (0xf2) frame, then reset into BareBoot
+/// recovery. No ROM USB boot / BOOTSEL fallback is used: in production the
+/// device has no BOOTSEL access, so BareBoot must always be the recovery path.
+async fn nack_and_recovery_reset(
+    class: &mut CdcAcmClass<'static, Driver<'static, USB>>,
+) -> ! {
+    let mut nack = [0u8; OUT_BUF_LEN];
+    if let Ok(len) = bareboot_protocol::encode_frame(
+        bareboot_protocol::responses::COMMAND_ERROR,
+        &[],
+        &mut nack,
+    ) {
+        for chunk in nack[..len].chunks(USB_MTU) {
+            let mut padded = [0u8; USB_MTU];
+            padded[..chunk.len()].copy_from_slice(chunk);
+            let _ = class.write_packet(&padded).await;
+        }
     }
+    // Let the NACK drain before resetting.
+    embassy_time::Timer::after_millis(10).await;
+    cortex_m::peripheral::SCB::sys_reset();
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +240,9 @@ async fn protocol_loop(
 ) -> bool {
     let mut rx = [0u8; RX_BUF_LEN];
     let mut rx_len: usize = 0;
+    // The first accepted SEND_BLOCK marks the update as in progress so a torn
+    // transfer can never leave the app slot bootable on the next reset.
+    let mut transfer_started = false;
 
     loop {
         let mut packet = [0u8; USB_MTU];
@@ -213,6 +269,18 @@ async fn protocol_loop(
                 FrameParse::Complete {
                     frame_len, command, ..
                 } => {
+                    // Mark the transfer in progress before any app page is
+                    // erased. This is the commit-state "begin" transition.
+                    if command == commands::RX_BLOCK && !transfer_started {
+                        if writer
+                            .write_commit_record(&encode_record(STATE_UPDATE_IN_PROGRESS))
+                            .is_err()
+                        {
+                            nack_and_recovery_reset(class).await;
+                        }
+                        transfer_started = true;
+                    }
+
                     let mut out = [0u8; OUT_BUF_LEN];
                     let result = match command {
                         commands::CONNECT
@@ -236,7 +304,11 @@ async fn protocol_loop(
                                 }
                             }
                         }
-                        Err(CoreError::Flash) => unrecoverable_fallback(),
+                        Err(CoreError::Flash) => {
+                            // State remains UPDATE_IN_PROGRESS; reset into
+                            // BareBoot recovery, never into ROM USB boot.
+                            nack_and_recovery_reset(class).await;
+                        }
                         Err(_) => {}
                     }
 
@@ -249,6 +321,14 @@ async fn protocol_loop(
                     if command == commands::COMPLETE && writer.is_completed() {
                         let (sp, pc) = app_vector_from_writer(writer);
                         if valid_app_vector(sp, pc) {
+                            // COMPLETE is sent by stock Katapult only after a
+                            // full readback SHA1 verification. Commit the image.
+                            if writer
+                                .write_commit_record(&encode_record(STATE_VALID))
+                                .is_err()
+                            {
+                                nack_and_recovery_reset(class).await;
+                            }
                             return true;
                         }
                     }
@@ -276,15 +356,20 @@ async fn main(_spawner: Spawner) {
         .unwrap_or(0);
 
     let (app_sp, app_pc) = read_app_vector();
+    let commit = read_commit();
 
-    if !should_enter_recovery(cookie, app_sp, app_pc) {
+    if !should_enter_recovery(cookie, app_sp, app_pc, commit) {
         // Normal path: clear the mailbox and jump with no USB initialisation.
         clear_cookie(mailbox);
         unsafe { RpFlash::boot_jump(APP_BASE) };
     }
 
-    // Recovery path.
-    let p = embassy_rp::init(Default::default());
+    // Recovery path. USB requires a precise 48 MHz clock; the ROSC used by
+    // Default::default() is not accurate enough for USB enumeration, so use
+    // the Pico 2's 12 MHz crystal to drive the USB PLL.
+    let mut hal_config = embassy_rp::config::Config::default();
+    hal_config.clocks.rosc = None;
+    let p = embassy_rp::init(hal_config);
 
     let driver = Driver::new(p.USB, Irqs);
     let mut config = embassy_usb::Config::new(0x1d50, 0x6177);
@@ -292,16 +377,16 @@ async fn main(_spawner: Spawner) {
     config.product = Some("BareBoot RP2350");
     config.serial_number = Some("0001");
     config.max_power = 100;
-    config.max_packet_size_0 = USB_MTU as u8;
+    config.max_packet_size_0 = 64;
 
-    static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
+    static CONFIG_DESC: StaticCell<[u8; 1024]> = StaticCell::new();
     static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
-    static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
+    static CONTROL_BUF: StaticCell<[u8; 256]> = StaticCell::new();
     static CDC_STATE: StaticCell<CdcAcmState> = StaticCell::new();
 
-    let config_desc = CONFIG_DESC.init([0; 256]);
+    let config_desc = CONFIG_DESC.init([0; 1024]);
     let bos_desc = BOS_DESC.init([0; 256]);
-    let control_buf = CONTROL_BUF.init([0; 64]);
+    let control_buf = CONTROL_BUF.init([0; 256]);
     let cdc_state = CDC_STATE.init(CdcAcmState::new());
 
     let mut builder = Builder::new(
@@ -334,9 +419,12 @@ async fn main(_spawner: Spawner) {
     };
     let mut writer = PagedWriter::<RpFlash, PAGE_SIZE>::new(flash, cfg);
 
+
     'recovery: loop {
-        // Boot window: wait up to ~5s for a host. If none arrives and a valid
-        // app exists, clear the cookie and boot. Invalid app stays in recovery.
+        // Boot window: poll the USB device stack alongside the connection
+        // wait. If no host arrives within ~5s and a valid committed app exists,
+        // clear the cookie and boot. Invalid app / non-valid commit stays in
+        // recovery.
         let wait_for_host = async { class.wait_connection().await };
         match select(
             usb.run(),
@@ -346,7 +434,7 @@ async fn main(_spawner: Spawner) {
         {
             Either::Second(Err(_)) => {
                 let (sp, pc) = read_app_vector();
-                if valid_app_vector(sp, pc) {
+                if valid_app_vector(sp, pc) && read_commit().is_valid() {
                     clear_cookie(mailbox);
                     unsafe { RpFlash::boot_jump(APP_BASE) };
                 }
@@ -357,7 +445,7 @@ async fn main(_spawner: Spawner) {
         }
 
         // Host connected: serve Katapult commands until completion or
-        // disconnect. The USB device runner is polled concurrently.
+        // disconnect, polling the USB device stack concurrently.
         let result = {
             let protocol = protocol_loop(&mut class, &mut writer);
             select(usb.run(), protocol).await
@@ -366,11 +454,11 @@ async fn main(_spawner: Spawner) {
         match result {
             Either::Second(true) => {
                 let (sp, pc) = app_vector_from_writer(&mut writer);
-                if valid_app_vector(sp, pc) {
+                if valid_app_vector(sp, pc) && read_commit().is_valid() {
                     clear_cookie(mailbox);
                     unsafe { RpFlash::boot_jump(APP_BASE) };
                 }
-                // Invalid flashed image: remain in recovery.
+                // Invalid flashed image or failed commit: remain in recovery.
             }
             Either::Second(false) => {
                 // Disconnected: restart the 5s boot window.

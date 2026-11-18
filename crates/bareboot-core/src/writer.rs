@@ -89,6 +89,11 @@ impl<F: FlashTarget, const PAGE: usize> PagedWriter<F, PAGE> {
         self.flash.read_bytes(addr, out)
     }
 
+    /// Persist an opaque commit-state record via the underlying flash target.
+    pub fn write_commit_record(&mut self, record: &[u8]) -> Result<(), CoreError> {
+        self.flash.write_commit_record(record)
+    }
+
     fn flush_page(&mut self) -> Result<(), CoreError> {
         self.flash.write_page_bytes(self.page_base, &self.page)?;
         let mut check = [0u8; 4];

@@ -19,6 +19,12 @@ pub trait FlashTarget {
     fn read_bytes(&mut self, addr: u32, out: &mut [u8]) -> Result<(), CoreError>;
     fn read_uid(&mut self, out: &mut [u8; 12]);
     unsafe fn boot_jump(app_entry: u32) -> !;
+
+    /// Persist an opaque commit-state record in target-owned flash.
+    /// Defaults to unsupported for targets that do not implement commit state.
+    fn write_commit_record(&mut self, _record: &[u8]) -> Result<(), CoreError> {
+        Err(CoreError::Flash)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

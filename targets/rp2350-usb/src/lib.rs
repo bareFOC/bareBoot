@@ -9,5 +9,6 @@
 extern crate std;
 
 pub mod boot;
+pub mod commit_state;
 
 pub use boot::*;

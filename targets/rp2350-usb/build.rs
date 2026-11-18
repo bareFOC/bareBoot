@@ -11,5 +11,6 @@ fn main() {
 
     // cortex-m-rt's link.x does `INCLUDE memory.x`; point the linker at OUT_DIR.
     println!("cargo:rustc-link-search={}", out_dir);
+
     println!("cargo:rerun-if-changed=memory.x");
 }
