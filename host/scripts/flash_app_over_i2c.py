@@ -30,16 +30,20 @@ CONNECT_RETRIES = 20
 CONNECT_RETRY_DELAY = 0.15
 
 
-def post(path, payload):
+def post(path, payload, retries=5):
     req = urllib.request.Request(BASE + path,
                                  data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"},
                                  method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read().decode())
-    except Exception as e:
-        return {"err": str(e)}
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.loads(r.read().decode())
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(0.015 * (attempt + 1))
+                continue
+            return {"err": str(e)}
 
 
 def crc16(data):
