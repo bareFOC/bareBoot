@@ -404,3 +404,67 @@ The validated deployment for this board uses the following concrete contract:
 Residual limitation: no SDA/SCL-only method can recover an application that has
 interrupts globally disabled or is stuck in an unrecoverable fault — there is no entity
 on the bus able to reset the chip. Document this as an accepted hardware limit.
+
+---
+
+## 8. Multi-Drop Bus Topology Recommendations & Architecture
+
+In multi-actuator robotics and multi-joint industrial mechanisms, multiple slave nodes share a single communication bus (e.g. I2C or I3C lines driven by an AgentLA host gateway). Flashing nodes across a shared multidrop bus introduces specific requirements to prevent bus collisions, bus lockups, and unrecoverable states.
+
+### Topology Overview
+
+```text
++-----------------------------------------------------------------+
+|                        AgentLA Host Gateway                     |
+|                  (REST API / multidrop_flashtool.py)            |
++-----------------------------------------------------------------+
+           | SCL (GP11)
+           | SDA (GP10)
+   +-------+-------------------------+-------------------------+
+   |                                 |                         |
++-------------+               +-------------+           +-------------+
+| Joint 1     |               | Joint 2     |           | Joint 3     |
+| Node 0x40   |               | Node 0x41   |           | Node 0x42   |
+| (BareBoot)  |               | (BareBoot)  |           | (BareBoot)  |
++-------------+               +-------------+           +-------------+
+```
+
+### Core Architecture Rules
+
+1. **Serialized Node Rollouts with Pre-Flight Inventory**:
+   - Updates must proceed sequentially ($Node_1 \rightarrow Node_2 \rightarrow \dots$).
+   - A pre-flight inventory scan probes every configured node address before triggering any bootloader resets. If any node on the shared bus is unreachable, the rollout aborts immediately, leaving running nodes online and avoiding partial system updates.
+
+2. **Strict Elimination of Clock Stretching**:
+   - On shared buses, holding SCL low freezes bus traffic for all connected sibling nodes.
+   - Bootloader targets configure `I2C_CR1_NOSTRETCH` on their I2C peripheral.
+   - The bootloader buffers incoming blocks during active I2C bus transactions and commits data to flash asynchronously after the bus transaction STOP condition is detected, or responds immediately with `0xFF` if queried before a response is ready.
+
+3. **Selective In-Band Bootloader Entry**:
+   - The host issues the single-byte `0xF0` strobe addressed specifically to the target node's hardware address.
+   - Sibling nodes ignore transactions not addressed to them. Only the targeted node writes `REQUEST_CANBOOT` (`0x5984E3FA6CA1589B`) into its SRAM mailbox and executes a software system reset.
+
+4. **Dynamic Address Binding from Flash Persistence**:
+   - Target nodes read their assigned `NODE_ID` from non-volatile flash storage on boot (e.g., `H5FlashStorage` dual-sector ping-pong storage on STM32H5 Bank 2 Sectors 14 & 15), falling back to `0x40` if unconfigured.
+   - The peripheral hardware address registers (`OAR1` for I2C, `DEVR0` for I3C) bind dynamically to this address.
+
+5. **Cross-Reset RAM Mailbox & Indefinite Timeout Override**:
+   - When entered via `0xF0` strobe, the node writes `0x5984E3FA6CA1589B` into `bl_vectors[0]`.
+   - On reboot, BareBoot clears the token and disables the autoboot timeout timer (`boot_window_active = 0`), remaining parked in bootloader mode indefinitely until flashing and verification complete.
+
+6. **Failsafe Blank-Vector Parking**:
+   - If an update is interrupted or an unprogrammed blank sector is present, BareBoot checks the application vector table (`SP` in RAM boundaries, `PC` in application flash with Thumb bit set).
+   - An invalid vector automatically cancels the autoboot timeout and parks the node permanently in bootloader mode, allowing handsfree recovery without an SWD debug probe.
+
+### Host Tooling
+
+The multidrop orchestrator script `host/scripts/multidrop_flashtool.py` automates multi-node rollouts using YAML/JSON configuration files:
+
+```bash
+# Full sequential rollout across all nodes in topology
+python3 host/scripts/multidrop_flashtool.py configs/multidrop_example.yaml
+
+# Targeted single-node update
+python3 host/scripts/multidrop_flashtool.py configs/multidrop_example.yaml --node joint_pitch
+```
+

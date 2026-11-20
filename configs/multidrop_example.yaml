@@ -1,0 +1,27 @@
+# Multi-Drop Bus Topology Configuration Example
+#
+# Configures a shared multidrop bus for sequential in-band firmware updates
+# of multi-axis robotic joints or multi-actuator clusters.
+
+bus:
+  type: i2c                  # "i2c" or "i3c"
+  base_url: "http://10.10.10.10"
+  speed_khz: 400             # Fast-mode 400 kHz or I3C SDR 1000+ kHz
+  reset_delay_sec: 0.35      # Delay following in-band 0xF0 entry strobe
+  connect_retries: 25        # CONNECT polling retries during boot window
+
+nodes:
+  - id: joint_yaw
+    address: 0x40
+    image: "artifacts/bareboot-stm32h503-i3c-i2c.bin"
+    enabled: true
+
+  - id: joint_pitch
+    address: 0x41
+    image: "artifacts/bareboot-stm32h503-i3c-i2c.bin"
+    enabled: true
+
+  - id: joint_roll
+    address: 0x42
+    image: "artifacts/bareboot-stm32h503-i3c-i2c.bin"
+    enabled: true

@@ -95,6 +95,51 @@ pub fn check_and_clear_bootloader_request(mailbox_addr: usize) -> bool {
     }
 }
 
+/// Validate an ARM Cortex-M or generic application vector table:
+/// - Initial Stack Pointer (SP) must be within plausible RAM boundaries and not blank (0xFFFFFFFF or 0).
+/// - Reset Vector (PC) must have Thumb bit set (for Cortex-M), must not be blank,
+///   and must reside within the application flash boundary `[app_base, flash_end)`.
+pub fn validate_app_vector(
+    sp: u32,
+    pc: u32,
+    ram_start: u32,
+    ram_end: u32,
+    app_base: u32,
+    flash_end: u32,
+) -> bool {
+    if sp == 0 || sp == 0xFFFF_FFFF || pc == 0 || pc == 0xFFFF_FFFF {
+        return false;
+    }
+    if sp < ram_start || sp > ram_end {
+        return false;
+    }
+    if (pc & 1) == 0 {
+        return false;
+    }
+    if pc < app_base || pc >= flash_end {
+        return false;
+    }
+    true
+}
+
+/// Failsafe decision logic: decides whether the device must remain parked in
+/// bootloader mode indefinitely.
+///
+/// Returns `true` if:
+/// - Mailbox token matches `REQUEST_BOOTLOADER` (handsfree request)
+/// - Application vector table is blank or invalid (failsafe blank-vector parking)
+pub fn should_park_in_bootloader(
+    mailbox_request: bool,
+    sp: u32,
+    pc: u32,
+    ram_start: u32,
+    ram_end: u32,
+    app_base: u32,
+    flash_end: u32,
+) -> bool {
+    mailbox_request || !validate_app_vector(sp, pc, ram_start, ram_end, app_base, flash_end)
+}
+
 
 pub mod writer;
 pub use writer::PagedWriter;
@@ -132,6 +177,46 @@ mod tests {
         assert_eq!(mailbox, 0);
 
         assert!(!check_and_clear_bootloader_request(addr));
+    }
+
+    #[test]
+    fn test_blank_vector_and_failsafe_parking() {
+        const RAM_START: u32 = 0x2000_0000;
+        const RAM_END: u32 = 0x2000_8000;
+        const APP_BASE: u32 = 0x0800_2000;
+        const FLASH_END: u32 = 0x0802_0000;
+
+        // Blank flash (unprogrammed sector 0xFFFFFFFF)
+        assert!(!validate_app_vector(0xFFFF_FFFF, 0xFFFF_FFFF, RAM_START, RAM_END, APP_BASE, FLASH_END));
+        assert!(should_park_in_bootloader(false, 0xFFFF_FFFF, 0xFFFF_FFFF, RAM_START, RAM_END, APP_BASE, FLASH_END));
+
+        // Zeroed flash
+        assert!(!validate_app_vector(0, 0, RAM_START, RAM_END, APP_BASE, FLASH_END));
+        assert!(should_park_in_bootloader(false, 0, 0, RAM_START, RAM_END, APP_BASE, FLASH_END));
+
+        // Valid vector: SP in RAM, PC in app flash with Thumb bit set
+        let valid_sp = 0x2000_4000;
+        let valid_pc = 0x0800_2101; // Thumb bit set (odd)
+        assert!(validate_app_vector(valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
+        assert!(!should_park_in_bootloader(false, valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
+
+        // Valid vector with mailbox request: must park indefinitely
+        assert!(should_park_in_bootloader(true, valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
+
+        // Invalid Thumb bit (even PC)
+        let even_pc = 0x0800_2100;
+        assert!(!validate_app_vector(valid_sp, even_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
+        assert!(should_park_in_bootloader(false, valid_sp, even_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
+
+        // Out of bounds PC (pointing to bootloader region < APP_BASE)
+        let bl_pc = 0x0800_0101;
+        assert!(!validate_app_vector(valid_sp, bl_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
+        assert!(should_park_in_bootloader(false, valid_sp, bl_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
+
+        // Out of bounds SP (pointing to flash)
+        let bad_sp = 0x0800_3000;
+        assert!(!validate_app_vector(bad_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
+        assert!(should_park_in_bootloader(false, bad_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
     }
 }
 

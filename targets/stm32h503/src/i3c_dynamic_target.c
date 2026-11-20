@@ -68,6 +68,58 @@ static uint8_t transmit_max;
 static volatile uint8_t rstact_pending;
 static uint8_t last_ccc_code;
 
+#define FLASH_STORAGE_MAGIC 0x46495348 // "FISH"
+#define FLASH_SECTOR_14_ADDR 0x0801C000
+#define FLASH_SECTOR_15_ADDR 0x0801E000
+#define FLASH_HEADER_SIZE 32
+#define FLASH_REG_NODE_ID_OFFSET 0x10
+
+struct flash_sector_header {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t payload_len;
+    uint32_t seq;
+    uint32_t crc32;
+    uint32_t reserved[4];
+};
+
+static uint8_t
+read_configured_node_id(void)
+{
+    const struct flash_sector_header *h14 =
+        (const struct flash_sector_header *)FLASH_SECTOR_14_ADDR;
+    const struct flash_sector_header *h15 =
+        (const struct flash_sector_header *)FLASH_SECTOR_15_ADDR;
+
+    int v14 = (h14->magic == FLASH_STORAGE_MAGIC && h14->version == 1
+               && h14->payload_len == 96);
+    int v15 = (h15->magic == FLASH_STORAGE_MAGIC && h15->version == 1
+               && h15->payload_len == 96);
+
+    const struct flash_sector_header *best = NULL;
+    if (v14 && v15) {
+        best = (h14->seq >= h15->seq) ? h14 : h15;
+    } else if (v14) {
+        best = h14;
+    } else if (v15) {
+        best = h15;
+    }
+
+    if (best) {
+        const uint8_t *payload = ((const uint8_t *)best) + FLASH_HEADER_SIZE;
+        uint8_t stored_id = payload[FLASH_REG_NODE_ID_OFFSET];
+        if (stored_id >= 0x08 && stored_id <= 0x77) {
+            return stored_id;
+        }
+    }
+
+#ifdef CONFIG_I2C_TARGET_ADDRESS
+    return CONFIG_I2C_TARGET_ADDRESS;
+#else
+    return 0x40;
+#endif
+}
+
 static void switch_to_i3c(void);
 
 // ---------------------------------------------------------
@@ -96,8 +148,11 @@ I2C1_EV_IRQHandler(void)
             uint8_t tpos = readb(&transmit_pos);
             uint8_t tmax = readb(&transmit_max);
             if (tpos < tmax) {
+                I2C_PERIPH->TXDR = transmit_buf[tpos];
+                writeb(&transmit_pos, tpos + 1);
                 I2C_PERIPH->CR1 |= I2C_CR1_TXIE;
             } else {
+                I2C_PERIPH->TXDR = 0xFF;
                 I2C_PERIPH->CR1 &= ~I2C_CR1_TXIE;
             }
         } else {
@@ -126,6 +181,7 @@ I2C1_EV_IRQHandler(void)
             writeb(&transmit_pos, tpos + 1);
         } else {
             I2C_PERIPH->TXDR = 0xFF;
+            I2C_PERIPH->CR1 &= ~I2C_CR1_TXIE;
         }
     }
 
@@ -256,13 +312,18 @@ switch_to_i3c(void)
     gpio_peripheral(GPIO_SCL, I3C_AF, 1);
     gpio_peripheral(GPIO_SDA, I3C_AF, 1);
 
+    // Ensure I3C2 peripheral clock is enabled
+    RCC->APB3ENR |= RCC_APB3ENR_I3C2EN;
+    (void)RCC->APB3ENR;
+
     // Initialize I3C2 peripheral as Target (PB3/PB4 AF3 maps to I3C2 on H503)
+    uint8_t target_addr = read_configured_node_id();
     I3C2->CFGR = 0;
     I3C2->CFGR = I3C_CFGR_RSTPTRN | I3C_CFGR_EXITPTRN;
     I3C2->BCR = 0x06;
     I3C2->DCR = 0x63;
     I3C2->EPIDR = (0x0114 << 16) | 0x0001;
-    I3C2->DEVR0 = (CONFIG_I3C_STATIC_ADDRESS & 0x7F) << 1;
+    I3C2->DEVR0 = (target_addr & 0x7F) << 1;
     I3C2->MAXRLR = MESSAGE_MAX;
     I3C2->MAXWLR = MESSAGE_MAX;
     I3C2->TIMINGR0 = (24 << I3C_TIMINGR0_SCLH_I2C_Pos) |
@@ -373,6 +434,8 @@ i3c_dynamic_target_init(void)
 {
     enable_pclock((uint32_t)I2C_PERIPH);
     enable_pclock((uint32_t)I3C2);
+    RCC->APB3ENR |= RCC_APB3ENR_I3C2EN;
+    (void)RCC->APB3ENR;
 
     // Start in I2C mode
     active_mode = MODE_I2C;
@@ -380,15 +443,17 @@ i3c_dynamic_target_init(void)
     I2C_PERIPH->CR1 = 0;
     I2C_PERIPH->TIMINGR = 0x10420F13; // 400 kHz fast-mode
 
-    // OAR1: Target Address (e.g. 0x30)
-    I2C_PERIPH->OAR1 = I2C_OAR1_OA1EN | ((CONFIG_I2C_TARGET_ADDRESS & 0x7F) << 1);
+    // OAR1: Target Address (e.g. 0x40 or configured from flash storage)
+    uint8_t target_addr = read_configured_node_id();
+    I2C_PERIPH->OAR1 = I2C_OAR1_OA1EN | ((target_addr & 0x7F) << 1);
 
     // OAR2: I3C Broadcast Address (0x7E)
     I2C_PERIPH->OAR2 = I2C_OAR2_OA2EN | (0x7E << 1);
 
     I2C_PERIPH->ICR = 0xFFFFFFFF;
     I2C_PERIPH->CR1 = I2C_CR1_PE | I2C_CR1_RXIE | I2C_CR1_ADDRIE |
-                I2C_CR1_STOPIE | I2C_CR1_NACKIE | I2C_CR1_ERRIE;
+                I2C_CR1_STOPIE | I2C_CR1_NACKIE | I2C_CR1_ERRIE |
+                I2C_CR1_NOSTRETCH;
 
     armcm_enable_irq(I2C1_EV_IRQHandler, I2C_EV_IRQn, 0);
     armcm_enable_irq(I2C1_ER_IRQHandler, I2C_ER_IRQn, 0);
