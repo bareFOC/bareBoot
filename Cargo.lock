@@ -69,6 +69,7 @@ name = "bareboot-core"
 version = "0.1.0"
 dependencies = [
  "bareboot-protocol",
+ "embedded-storage",
 ]
 
 [[package]]
@@ -365,6 +366,12 @@ name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
+
+[[package]]
+name = "embedded-storage"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c815b3ed4213d85d6cfd274b871f430c0681084e28dfd4a537877f47f844ec83"
 
 [[package]]
 name = "equivalent"

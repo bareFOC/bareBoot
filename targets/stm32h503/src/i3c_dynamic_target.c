@@ -144,17 +144,8 @@ I2C1_EV_IRQHandler(void)
         I2C_PERIPH->ICR = I2C_ICR_ADDRCF;
 
         if (isr & I2C_ISR_DIR) {
-            // Master read (slave transmit)
-            uint8_t tpos = readb(&transmit_pos);
-            uint8_t tmax = readb(&transmit_max);
-            if (tpos < tmax) {
-                I2C_PERIPH->TXDR = transmit_buf[tpos];
-                writeb(&transmit_pos, tpos + 1);
-                I2C_PERIPH->CR1 |= I2C_CR1_TXIE;
-            } else {
-                I2C_PERIPH->TXDR = 0xFF;
-                I2C_PERIPH->CR1 &= ~I2C_CR1_TXIE;
-            }
+            // Master read (slave transmit): enable TXIE to stream buffered data or non-blocking 0xFF
+            I2C_PERIPH->CR1 |= I2C_CR1_TXIE;
         } else {
             // Master write (slave receive)
             I2C_PERIPH->CR1 &= ~I2C_CR1_TXIE;
@@ -180,8 +171,8 @@ I2C1_EV_IRQHandler(void)
             I2C_PERIPH->TXDR = transmit_buf[tpos];
             writeb(&transmit_pos, tpos + 1);
         } else {
+            // Non-blocking: provide dummy 0xFF so clock is never stretched indefinitely
             I2C_PERIPH->TXDR = 0xFF;
-            I2C_PERIPH->CR1 &= ~I2C_CR1_TXIE;
         }
     }
 
@@ -457,6 +448,10 @@ i3c_dynamic_target_init(void)
 
     armcm_enable_irq(I2C1_EV_IRQHandler, I2C_EV_IRQn, 0);
     armcm_enable_irq(I2C1_ER_IRQHandler, I2C_ER_IRQn, 0);
+
+    // Also pre-register I3C interrupts so they exist in the vector table
+    armcm_enable_irq(I3C2_EV_IRQHandler, I3C2_EV_IRQn, 0);
+    armcm_enable_irq(I3C2_ER_IRQHandler, I3C2_ER_IRQn, 0);
 
     // Configure pins for I2C target mode initially
     gpio_peripheral(GPIO_SCL, I2C_AF, 1);

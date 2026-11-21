@@ -41,3 +41,14 @@ fn bad_crc_is_invalid() {
     let parsed = scan(&buf[..len]);
     assert!(matches!(parsed, FrameParse::Invalid { .. }));
 }
+
+#[test]
+fn test_ccc_and_entry_contracts() {
+    assert_eq!(I2C_CMD_ENTER_BOOTLOADER, 0xF0);
+    assert_eq!(I3C_BROADCAST_ADDR, 0x7E);
+    assert_eq!(CCC_BCAST_ENTDAA, 0x07);
+    assert_eq!(CCC_BCAST_RSTACT, 0x2A);
+    assert_eq!(CCC_DIRECT_RSTACT, 0x9A);
+    assert_eq!(CCC_DIRECT_SETDASA, 0x87);
+    assert_eq!(RSTACT_DEF_TGT_RESET, 0x02);
+}

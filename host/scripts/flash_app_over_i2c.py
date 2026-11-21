@@ -18,9 +18,13 @@ import urllib.request
 
 DEFAULT_BASE = "http://10.10.10.10"
 DEFAULT_IMAGE = "/tmp/opencode/n20-flash-test.bin"
+DEFAULT_SDA = 11
+DEFAULT_SCL = 10
 
 BASE = os.environ.get("BAREBOOT_REST_URL", DEFAULT_BASE)
 IMG_PATH = DEFAULT_IMAGE
+SDA = DEFAULT_SDA
+SCL = DEFAULT_SCL
 
 # In-band entry contract implemented by the application firmware.
 ENTRY_ADDR = 0x40
@@ -86,22 +90,35 @@ def parse(data):
 
 def xfer_write(hexstr):
     return post("/api/v1/bus/i2c/transfer",
-                {"addr": 0x40, "data_hex": hexstr, "read_len": 0})
+                {"addr": 0x40, "sda": SDA, "scl": SCL, "data_hex": hexstr, "read_len": 0})
 
 
 def xfer_read(n=32):
     return post("/api/v1/bus/i2c/transfer",
-                {"addr": 0x40, "data_hex": "", "read_len": n})
+                {"addr": 0x40, "sda": SDA, "scl": SCL, "data_hex": "", "read_len": n})
 
 
-def exchange(cmd, payload=b'', wait=0.03, rd=32):
-    r = xfer_write(frame(cmd, payload).hex())
-    if r.get("status") != "ok":
-        return None, r
+def exchange(cmd, payload=b'', wait=0.02, rd=48, timeout=2.0):
+    f_hex = frame(cmd, payload).hex()
+    res = post("/api/v1/bus/i2c/transfer",
+               {"addr": 0x40, "sda": SDA, "scl": SCL, "data_hex": f_hex, "read_len": rd})
+    if res.get("status") == "ok" and res.get("rx_hex"):
+        p = parse(bytes.fromhex(res["rx_hex"]))
+        if p:
+            return p, res
+
     time.sleep(wait)
-    r = xfer_read(rd)
-    p = parse(bytes.fromhex(r.get("rx_hex", ""))) if r.get("rx_hex") else None
-    return p, r
+    deadline = time.time() + timeout
+    rx_acc = bytearray()
+    while time.time() < deadline:
+        r = xfer_read(rd)
+        if r.get("rx_hex"):
+            rx_acc.extend(bytes.fromhex(r["rx_hex"]))
+            p = parse(rx_acc)
+            if p:
+                return p, r
+        time.sleep(0.01)
+    return None, res
 
 
 def connect_once():
@@ -136,7 +153,7 @@ def ensure_bootloader():
 
 
 def main():
-    global BASE, IMG_PATH
+    global BASE, IMG_PATH, SDA, SCL
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("image", nargs="?", default=DEFAULT_IMAGE,
                     help="firmware image to flash")
@@ -144,9 +161,13 @@ def main():
                                                      DEFAULT_BASE),
                     help="AgentLA REST base URL (env BAREBOOT_REST_URL; "
                          "default %(default)s)")
+    ap.add_argument("--sda", type=int, default=DEFAULT_SDA, help="SDA pin (default %(default)s)")
+    ap.add_argument("--scl", type=int, default=DEFAULT_SCL, help="SCL pin (default %(default)s)")
     args = ap.parse_args()
     BASE = args.base.rstrip("/")
     IMG_PATH = args.image
+    SDA = args.sda
+    SCL = args.scl
 
     # In-band entry: CONNECT first, F0 strobe to 0x40 and retry if needed.
     p = ensure_bootloader()
@@ -168,16 +189,21 @@ def main():
         blk = blk + b'\xff' * (bs - len(blk))
         addr = app_base + i * bs
         payload = addr.to_bytes(4, "little") + blk
-        # page flush every 128 blocks; allow extra time
-        wait = 0.30 if (i + 1) % 128 == 0 else 0.02
-        p, r = exchange(0x12, payload, wait=wait, rd=24)
+        # sector erase / page flush every 128 blocks; allow extra time
+        wait = 0.40 if (i % 128 == 0 or (i + 1) % 128 == 0) else 0.015
+        p, r = None, None
+        for attempt in range(3):
+            p, r = exchange(0x12, payload, wait=wait, rd=48)
+            if p and p["cmd"] == 0xA0:
+                break
+            time.sleep(0.05)
         if not p or p["cmd"] != 0xA0:
             print("BLOCK %d FAIL addr=0x%08x p=%s r=%s" % (i, addr, p, r))
             fails += 1
             if fails > 3:
                 sys.exit(2)
-        if (i + 1) % 200 == 0:
-            print("  %d/%d blocks, %.1fs" % (i + 1, nb, time.time() - t0))
+        if (i + 1) % 100 == 0 or (i + 1) == nb:
+            print("  %d/%d blocks, %.1fs" % (i + 1, nb, time.time() - t0), flush=True)
     print("blocks done in %.1fs, fails=%d" % (time.time() - t0, fails))
     if fails:
         sys.exit(3)

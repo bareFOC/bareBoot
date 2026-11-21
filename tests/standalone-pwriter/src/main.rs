@@ -52,7 +52,7 @@ fn main()->! {
     unsafe { core::ptr::write_volatile(0x4002_1018 as *mut u32, core::ptr::read_volatile(0x4002_1018 as *const u32) | 0x810 | 0x10); } // enable flash/RCC
     Bluepill::unlock();
     let flash=Flash;
-    let cfg=BootConfig { protocol_version:0x00010100, app_base:0x0800_1000, block_size:64, mcu_type:b"stm32f103c8", software_version:b"dev", uid:[0;12] };
+    let cfg=BootConfig { protocol_version:0x00010100, app_base:0x0800_1000, app_end:0x0801_0000, block_size:64, mcu_type:b"stm32f103c8", software_version:b"dev", uid:[0;12] };
     let mut result: u32 = 0xDEAD;
     let mut writer=PagedWriter::<Flash,1024>::new(flash,cfg);
     let data: [u8;64]=[0x11;64];

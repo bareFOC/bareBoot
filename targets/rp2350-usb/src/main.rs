@@ -152,8 +152,10 @@ impl FlashTarget for RpFlash {
     unsafe fn boot_jump(app_entry: u32) -> ! {
         unsafe {
             cortex_m::interrupt::disable();
-            let scb = &*cortex_m::peripheral::SCB::PTR;
-            scb.vtor.write(app_entry);
+            Self::peripheral_cleandown();
+            let mut p = cortex_m::Peripherals::steal();
+            p.SCB.invalidate_icache();
+            p.SCB.vtor.write(app_entry);
             cortex_m::asm::dsb();
             cortex_m::asm::isb();
 
@@ -169,6 +171,27 @@ impl FlashTarget for RpFlash {
         }
     }
 }
+
+impl RpFlash {
+    /// Peripheral cleandown routine to disable active communication interrupts,
+    /// SysTick, and USB pull-ups before transferring control to the application.
+    unsafe fn peripheral_cleandown() {
+        let mut p = cortex_m::Peripherals::steal();
+        p.SYST.disable_interrupt();
+        p.SYST.disable_counter();
+
+        for i in 0..8 {
+            p.NVIC.icer[i].write(0xFFFF_FFFF);
+            p.NVIC.icpr[i].write(0xFFFF_FFFF);
+        }
+
+        // Disable USB pull-up on RP2350 (USBCTRL_REGS_BASE 0x50110000, SIE_CTRL 0x4C, bit 16 PULLUP_EN)
+        const USB_SIE_CTRL: *mut u32 = (0x5011_0000 + 0x4C) as *mut u32;
+        let val = core::ptr::read_volatile(USB_SIE_CTRL);
+        core::ptr::write_volatile(USB_SIE_CTRL, val & !(1 << 16));
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Boot helpers
@@ -412,6 +435,7 @@ async fn main(_spawner: Spawner) {
     let cfg = BootConfig {
         protocol_version: 0x0001_0100,
         app_base: APP_BASE,
+        app_end: APP_END,
         block_size: BLOCK_SIZE,
         mcu_type: b"rp2350",
         software_version: b"dev",

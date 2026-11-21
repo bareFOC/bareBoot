@@ -142,8 +142,12 @@ pub fn should_park_in_bootloader(
 
 
 pub mod writer;
-pub use writer::PagedWriter;
+pub use writer::{PagedWriter, WatchdogFeed, WatchdogFlash};
 pub mod dispatch;
+pub mod commit;
+pub use commit::{CommitState, MonotonicCommitJournal, STATE_UPDATE_IN_PROGRESS, STATE_VALID};
+pub mod storage_adapter;
+pub use storage_adapter::NorFlashAdapter;
 
 #[cfg(test)]
 mod tests {
@@ -224,6 +228,7 @@ mod tests {
 pub struct BootConfig {
     pub protocol_version: u32,
     pub app_base: u32,
+    pub app_end: u32,
     pub block_size: usize,
     pub mcu_type: &'static [u8],
     pub software_version: &'static [u8],
@@ -298,6 +303,7 @@ mod advanced_tests {
         let cfg = BootConfig {
             protocol_version: 0x00010100,
             app_base: 0x1000,
+            app_end: 0x2000,
             block_size: 64,
             mcu_type: b"ch32v203",
             software_version: b"dev",
@@ -318,6 +324,7 @@ mod advanced_tests {
         let cfg = BootConfig {
             protocol_version: 0x00010100,
             app_base: 0x1000,
+            app_end: 0x2000,
             block_size: 64,
             mcu_type: b"ch32",
             software_version: b"dev",

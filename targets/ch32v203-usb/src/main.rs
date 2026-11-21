@@ -105,6 +105,7 @@ async fn main(_spawner: Spawner) {
     let cfg = BootConfig {
         protocol_version: 0x00010100,
         app_base: 0x0800_1000,
+        app_end: 0x0801_0000,
         block_size: 64,
         mcu_type: b"ch32v203c8",
         software_version: b"dev",

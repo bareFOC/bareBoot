@@ -19,6 +19,34 @@ pub const SERIAL_BL_REQ: &[u8] = b"~ \x1c Request Serial Bootloader!! ~";
 /// 1-byte command sent over I2C/I3C to request entering bootloader.
 pub const I2C_CMD_ENTER_BOOTLOADER: u8 = 0xF0;
 
+/// MIPI I3C Common Command Codes (CCC) and defining bytes
+pub mod ccc {
+    /// MIPI I3C Controller broadcast address (0x7E)
+    pub const I3C_BROADCAST_ADDR: u8 = 0x7E;
+
+    // Common Command Codes (CCC)
+    pub const DIRECT_ENEC: u8 = 0x00;
+    pub const DIRECT_DISEC: u8 = 0x01;
+    pub const DIRECT_RSTDAA: u8 = 0x06;
+    pub const BCAST_ENTDAA: u8 = 0x07;
+    pub const BCAST_RSTACT: u8 = 0x2A;
+    pub const DIRECT_SETDASA: u8 = 0x87;
+    pub const DIRECT_RSTACT: u8 = 0x9A;
+    pub const DIRECT_RSTACT_ALT: u8 = 0xAA;
+
+    // RSTACT Defining Bytes
+    pub const RSTACT_DEF_NO_RESET: u8 = 0x00;
+    pub const RSTACT_DEF_PERIPH_RESET: u8 = 0x01;
+    pub const RSTACT_DEF_TGT_RESET: u8 = 0x02;
+}
+
+pub const I3C_BROADCAST_ADDR: u8 = ccc::I3C_BROADCAST_ADDR;
+pub const CCC_BCAST_ENTDAA: u8 = ccc::BCAST_ENTDAA;
+pub const CCC_BCAST_RSTACT: u8 = ccc::BCAST_RSTACT;
+pub const CCC_DIRECT_RSTACT: u8 = ccc::DIRECT_RSTACT;
+pub const CCC_DIRECT_SETDASA: u8 = ccc::DIRECT_SETDASA;
+pub const RSTACT_DEF_TGT_RESET: u8 = ccc::RSTACT_DEF_TGT_RESET;
+
 /// Standard CAN ID for host node reboot commands.
 pub const CAN_ADMIN_REBOOT_ID: u32 = 0x3F0;
 
