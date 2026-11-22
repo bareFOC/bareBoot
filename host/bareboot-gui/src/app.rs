@@ -463,27 +463,23 @@ impl eframe::App for BarebootApp {
                 let dock_style = DockStyle::from_ui(ui);
                 let dock_area = DockArea::new(Id::new("bareboot_workbench_dock"));
 
-                let mut to_render: Vec<PanelId> = Vec::new();
+                let mut dock_layout = std::mem::replace(&mut self.dock_layout, Layout { root: None, floating: Vec::new() });
                 let output = dock_area.show(
                     ui,
-                    &self.dock_layout,
+                    &dock_layout,
                     &dock_style,
                     |panel| panel.title().to_string(),
                     |_panel| Permissions::default(),
-                    |_ui, panel| {
-                        to_render.push(*panel);
+                    |ui, panel| {
+                        self.render_panel_body(ui, panel);
                     },
                 );
 
                 // Apply any docking changes (drag, drop, split, reorder)
                 for action in output.actions {
-                    let _ = self.dock_layout.apply(action);
+                    let _ = dock_layout.apply(action);
                 }
-
-                // Render panels inside their assigned areas
-                for panel in to_render {
-                    self.render_panel_body(ui, &panel);
-                }
+                self.dock_layout = dock_layout;
             });
         }
 
