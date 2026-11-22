@@ -220,7 +220,7 @@ I3C2_EV_IRQHandler(void)
     // CCC Command handler (RSTDAA and RSTACT)
     uint32_t rmr = I3C2->RMR;
     uint8_t ccc_code = (rmr & I3C_RMR_RCODE_Msk) >> I3C_RMR_RCODE_Pos;
-    if (ccc_code == CCC_DIRECT_RSTDAA) {
+    if (ccc_code == CCC_DIRECT_RSTDAA || ccc_code == 0x06 || ccc_code == 0x86) {
         I3C2->DEVR0 &= ~I3C_DEVR0_DAVAL;
     }
     // RSTACT carries a defining byte in the RX FIFO.  Arm a one-shot
@@ -280,10 +280,12 @@ I3C2_EV_IRQHandler(void)
 void
 I3C2_ER_IRQHandler(void)
 {
-    uint32_t evr = I3C2->EVR;
-    if (evr & I3C_EVR_ERRF) {
-        I3C2->CEVR = I3C_CEVR_CERRF;
+    // Drain RX FIFO on overrun or error
+    while (I3C2->EVR & I3C_EVR_RXFNEF) {
+        (void)I3C2->RDR;
     }
+    // Clear all pending error and event flags
+    I3C2->CEVR = 0xFFFFFFFF;
 }
 
 // ---------------------------------------------------------
@@ -299,7 +301,7 @@ switch_to_i3c(void)
     NVIC_DisableIRQ(I2C_EV_IRQn);
     NVIC_DisableIRQ(I2C_ER_IRQn);
 
-    // Switch PB6 and PB7 to AF3 (I3C2)
+    // Switch PB3 and PB4 to AF3 (I3C2)
     gpio_peripheral(GPIO_SCL, I3C_AF, 1);
     gpio_peripheral(GPIO_SDA, I3C_AF, 1);
 
@@ -314,7 +316,7 @@ switch_to_i3c(void)
     I3C2->BCR = 0x06;
     I3C2->DCR = 0x63;
     I3C2->EPIDR = (0x0114 << 16) | 0x0001;
-    I3C2->DEVR0 = (target_addr & 0x7F) << 1;
+    I3C2->DEVR0 = ((target_addr & 0x7F) << 1) | I3C_DEVR0_DAVAL;
     I3C2->MAXRLR = MESSAGE_MAX;
     I3C2->MAXWLR = MESSAGE_MAX;
     I3C2->TIMINGR0 = (24 << I3C_TIMINGR0_SCLH_I2C_Pos) |
@@ -431,6 +433,10 @@ i3c_dynamic_target_init(void)
     // Start in I2C mode
     active_mode = MODE_I2C;
 
+    // Configure pins for I2C target mode initially before enabling peripheral
+    gpio_peripheral(GPIO_SCL, I2C_AF, 1);
+    gpio_peripheral(GPIO_SDA, I2C_AF, 1);
+
     I2C_PERIPH->CR1 = 0;
     I2C_PERIPH->TIMINGR = 0x10420F13; // 400 kHz fast-mode
 
@@ -443,8 +449,7 @@ i3c_dynamic_target_init(void)
 
     I2C_PERIPH->ICR = 0xFFFFFFFF;
     I2C_PERIPH->CR1 = I2C_CR1_PE | I2C_CR1_RXIE | I2C_CR1_ADDRIE |
-                I2C_CR1_STOPIE | I2C_CR1_NACKIE | I2C_CR1_ERRIE |
-                I2C_CR1_NOSTRETCH;
+                I2C_CR1_STOPIE | I2C_CR1_NACKIE | I2C_CR1_ERRIE;
 
     armcm_enable_irq(I2C1_EV_IRQHandler, I2C_EV_IRQn, 0);
     armcm_enable_irq(I2C1_ER_IRQHandler, I2C_ER_IRQn, 0);
@@ -452,9 +457,5 @@ i3c_dynamic_target_init(void)
     // Also pre-register I3C interrupts so they exist in the vector table
     armcm_enable_irq(I3C2_EV_IRQHandler, I3C2_EV_IRQn, 0);
     armcm_enable_irq(I3C2_ER_IRQHandler, I3C2_ER_IRQn, 0);
-
-    // Configure pins for I2C target mode initially
-    gpio_peripheral(GPIO_SCL, I2C_AF, 1);
-    gpio_peripheral(GPIO_SDA, I2C_AF, 1);
 }
 DECL_INIT(i3c_dynamic_target_init);

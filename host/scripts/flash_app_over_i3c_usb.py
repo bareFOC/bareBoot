@@ -31,6 +31,7 @@ DEFAULT_IMAGE = "/tmp/opencode/n20-flash-test.bin"
 DEFAULT_FREQ_KHZ = 12500  # 12.5 MHz SDR
 DEFAULT_DYNAMIC_ADDR = 0x40
 DEFAULT_TIMEOUT_MS = 2000
+DEFAULT_REST_URL = os.environ.get("BAREBOOT_REST_URL", "http://10.10.10.10")
 
 # Katapult Protocol Command Codes
 CMD_CONNECT     = 0x11
@@ -40,6 +41,38 @@ CMD_REQ_BLOCK   = 0x14
 CMD_COMPLETE    = 0x15
 RESP_ACK        = 0xA0
 RESP_NACK       = 0xA1
+
+
+def trigger_inband_reboot_and_switch(rest_base: str = DEFAULT_REST_URL, sda: int = 11, scl: int = 10) -> bool:
+    """Send in-band 0xF0 reboot strobe to 0x40 over I2C to reset running application
+    firmware into BareBoot, followed by a broadcast ping to 0x7E to trigger
+    BareBoot's hardware switch from I2C to MIPI I3C mode.
+    """
+    import urllib.request
+    import json
+
+    def post(path, payload):
+        req = urllib.request.Request(
+            f"{rest_base}{path}",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=2) as r:
+                return json.loads(r.read().decode())
+        except Exception as e:
+            return {"err": str(e)}
+
+    print("Sending in-band reboot strobe 0xF0 to 0x40 over I2C...")
+    sr = post("/api/v1/bus/i2c/transfer", {"addr": 0x40, "sda": sda, "scl": scl, "data_hex": "F0", "read_len": 0})
+    time.sleep(0.3)
+
+    print("Pinging I3C broadcast address 0x7E to trigger hardware switch to I3C...")
+    post("/api/v1/bus/i2c/transfer", {"addr": 0x7E, "sda": sda, "scl": scl, "data_hex": "00", "read_len": 0})
+    time.sleep(0.05)
+    return True
+
 
 
 def crc16(data: bytes) -> int:
@@ -314,8 +347,25 @@ def run_benchmark(image_path: str, freq_khz: int, dry_run: bool) -> int:
             return 2
 
         client.set_bus_speed(freq_khz)
-        print("Assigning dynamic address via ENTDAA...")
-        dev_info = client.entdaa(DEFAULT_DYNAMIC_ADDR)
+        print("Checking target dynamic address via ENTDAA...")
+        dev_info = None
+        try:
+            dev_info = client.entdaa(DEFAULT_DYNAMIC_ADDR)
+        except Exception:
+            pass
+
+        if dev_info is None:
+            print("Target not in I3C mode. Triggering in-band reboot into BareBoot and switching to I3C...")
+            trigger_inband_reboot_and_switch()
+            try:
+                client.rstdaa()
+            except Exception:
+                pass
+            try:
+                dev_info = client.entdaa(DEFAULT_DYNAMIC_ADDR)
+            except Exception as e:
+                print(f"ENTDAA retry after switch failed: {e}")
+
         print(f"ENTDAA assigned address: {dev_info}")
 
     flasher = I3cUsbFlasher(client, addr=DEFAULT_DYNAMIC_ADDR, freq_khz=freq_khz)

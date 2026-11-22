@@ -144,18 +144,28 @@ def run_comprehensive_benchmark(image_path: str = DEFAULT_IMAGE):
         print(f"{r['mode']:<36} | {r['clock']:<12} | {r['total_time_s']:>7.3f} s  | {r['throughput_kb_s']:>8.2f} KB/s | {r['limiting_factor']}")
 
     print("-" * 104)
-    print("\nSPEEDUP ANALYSIS (Compared to Measured HTTP REST Baseline of 179.80 s):")
-    baseline_time = results[0]["total_time_s"]
-    for r in results[1:]:
+    print("\nSPEEDUP ANALYSIS (Baseline: Standard I2C Direct Bus @ 100 kHz):")
+    # Use Standard I2C (Direct Bus) as the 1.0x baseline reference
+    baseline_result = results[1]
+    baseline_time = baseline_result["total_time_s"]
+    print(f"  * {baseline_result['mode']:<36}:      1.0x (Baseline Reference, {baseline_time:.3f} s)")
+
+    for r in results[2:]:
         spd = baseline_time / r["total_time_s"]
-        print(f"  * {r['mode']:<36}: {spd:>8.1f}x speedup ({r['total_time_s']:.3f} s vs {baseline_time:.2f} s)")
+        print(f"  * {r['mode']:<36}: {spd:>8.1f}x speedup ({r['total_time_s']:.3f} s vs {baseline_time:.3f} s)")
+
+    legacy_result = results[0]
+    legacy_ratio = legacy_result["total_time_s"] / baseline_time
+    print(f"\n  [Legacy Note] {legacy_result['mode']}: {1.0 / legacy_ratio:.2f}x speed ({legacy_ratio:.1f}x slower than 100 kHz direct bus, {legacy_result['total_time_s']:.2f} s)")
 
     print("\n" + "=" * 76)
     print("KEY TAKEAWAYS FOR EMBEDDED ACTUATORS (FISHYSERVO):")
-    print("  1. Standard I2C at 400 kHz completes in ~2.74 s (65.6x faster than HTTP REST).")
-    print("  2. MIPI I3C at 12.5 MHz completes in ~0.31 s (580.0x faster than HTTP REST).")
+    print("  1. Fast-Mode I2C at 400 kHz completes in ~2.74 s (3.7x faster than 100 kHz I2C).")
+    print("  2. MIPI I3C at 12.5 MHz completes in ~0.31 s (33.2x faster than 100 kHz I2C).")
     print("  3. At 12.5 MHz, bus transfer takes only 80 ms; OTA speed reaches the physical")
     print("     speed limit of STM32H5 NOR flash charge-pump programming (~229 ms).")
+    print("  4. Legacy HTTP REST bridge is 17.5x slower than standard 100 kHz direct bus")
+    print("     due to HTTP round-trip latency and JSON serialization overhead.")
     print("=" * 76 + "\n")
 
 
