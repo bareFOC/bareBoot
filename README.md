@@ -101,6 +101,22 @@ cargo run -p bareboot-tui
 
 Tabs: Bus, Config, Build, Flash (wizard), Profiles. Keys: `1-5` tabs, `n/p` wizard steps, `m/e/i/c` backend, `r` run, `w` save config, `l/s/d` profiles, `q` quit.
 
+### BareBoot Graphical Workbench (bareboot-gui)
+
+A cross-platform desktop, mobile (Android USB OTG), and WebAssembly workbench built with `egui` and `craft-ui`:
+
+- **Live Web Workbench (GitHub Pages)**: [https://barefoc.github.io/bareBoot/](https://barefoc.github.io/bareBoot/)
+- **Documentation**: [BareBoot Graphical Workbench Guide](docs/bareboot-gui.md)
+
+```sh
+# Run desktop workbench
+cargo run -p bareboot-gui
+
+# Run WebAssembly workbench locally
+cd host/bareboot-gui
+trunk serve
+```
+
 ### Target Firmware (Embedded)
 
 Target bootloaders reside in `targets/` with isolated target toolchains:

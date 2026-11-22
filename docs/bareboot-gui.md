@@ -114,6 +114,8 @@ The workbench compiles to WebAssembly (`wasm32-unknown-unknown`) and runs direct
   ```
   Setting `public_url = "./"` ensures all generated scripts and WebAssembly assets use relative paths, functioning correctly under repository subpaths such as `https://<owner>.github.io/<repo>/`.
 
+- **Live Production URL**: [https://barefoc.github.io/bareBoot/](https://barefoc.github.io/bareBoot/)
+
 ### Automated GitHub Actions CI/CD
 The repository includes `.github/workflows/deploy-pages.yml` which automatically:
 1. Sets up the Rust toolchain with the `wasm32-unknown-unknown` target.
