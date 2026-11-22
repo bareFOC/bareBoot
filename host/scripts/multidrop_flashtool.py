@@ -13,10 +13,12 @@ import argparse
 import hashlib
 import json
 import os
+import struct
 import sys
 import time
 import urllib.error
 import urllib.request
+import zlib
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -31,6 +33,86 @@ ENTRY_STROBE_BYTE = bytes([0xF0])
 ENTRY_RESET_DELAY_DEFAULT = 0.35
 CONNECT_RETRIES_DEFAULT = 25
 CONNECT_RETRY_DELAY_DEFAULT = 0.15
+
+REQUEST_CANBOOT = 0x5984E3FA6CA1589B
+REQUEST_APP = 0x4649534841505031
+KATAPULT_UUID_SEED = 0xA16231A7
+SOFT_RESET_MAILBOX_ADDR = 0x20007FE0
+CMD_GET_CANBUS_ID = 0x16
+
+MASK_64 = 0xFFFFFFFFFFFFFFFF
+
+
+def fasthash_mix(val: int) -> int:
+    val ^= val >> 23
+    val = (val * 0x2127599BF4325C37) & MASK_64
+    val ^= val >> 47
+    return val
+
+
+def fasthash64(buffer: bytes, seed: int = KATAPULT_UUID_SEED) -> int:
+    m = 0x880355F21E6D1965
+    h = (seed ^ ((len(buffer) * m) & MASK_64)) & MASK_64
+    long_count = len(buffer) // 8
+    if long_count:
+        words = struct.unpack(f"<{long_count}Q", buffer[:long_count * 8])
+        for v in words:
+            h ^= fasthash_mix(v)
+            h = (h * m) & MASK_64
+    rem = buffer[long_count * 8:]
+    if rem:
+        v = 0
+        for i in range(len(rem)):
+            v |= rem[i] << (8 * i)
+        h ^= fasthash_mix(v)
+        h = (h * m) & MASK_64
+    return fasthash_mix(h)
+
+
+def katapult_can_uuid(uid: bytes) -> bytes:
+    """Compute 6-byte Katapult CAN UUID from silicon UID bytes."""
+    h = fasthash64(uid, KATAPULT_UUID_SEED)
+    return struct.pack("<Q", h)[:6]
+
+
+def fallback_address(uid: List[int]) -> int:
+    """Calculate deterministic fallback address from silicon UID words: 0x10 + ((uid[0] ^ uid[1] ^ uid[2]) & 0x3F)."""
+    return 0x10 + ((uid[0] ^ uid[1] ^ uid[2]) & 0x3F)
+
+
+def make_soft_reset_mailbox(magic: int, dynamic_node_id: int, bus_type: int = 0, flags: int = 0, can_assigned_id: int = 0) -> bytes:
+    """Pack 32-byte SoftResetMailbox with IEEE CRC32 over the first 28 bytes."""
+    payload = struct.pack(
+        "<QBBHI3I",
+        magic,
+        dynamic_node_id,
+        bus_type,
+        flags,
+        can_assigned_id,
+        0, 0, 0
+    )
+    crc = zlib.crc32(payload) & 0xFFFFFFFF
+    return payload + struct.pack("<I", crc)
+
+
+def parse_soft_reset_mailbox(data: bytes) -> Optional[Dict[str, Any]]:
+    """Validate and unpack 32-byte SoftResetMailbox."""
+    if len(data) < 32:
+        return None
+    payload = data[:28]
+    expected_crc = struct.unpack("<I", data[28:32])[0]
+    calc_crc = zlib.crc32(payload) & 0xFFFFFFFF
+    if calc_crc != expected_crc:
+        return None
+    magic, dynamic_node_id, bus_type, flags, can_assigned_id, r0, r1, r2 = struct.unpack("<QBBHI3I", payload)
+    return {
+        "magic": magic,
+        "dynamic_node_id": dynamic_node_id,
+        "bus_type": bus_type,
+        "flags": flags,
+        "can_assigned_id": can_assigned_id,
+        "crc32": expected_crc,
+    }
 
 
 def crc16(data: bytes) -> int:
@@ -200,11 +282,12 @@ class HttpI3cTransport(BaseBusTransport):
 
 
 class NodeConfig:
-    def __init__(self, node_id: str, address: int, image_path: str, enabled: bool = True):
+    def __init__(self, node_id: str, address: int, image_path: str, enabled: bool = True, uuid: Optional[str] = None):
         self.node_id = str(node_id)
         self.address = int(address)
         self.image_path = str(image_path)
         self.enabled = bool(enabled)
+        self.uuid = str(uuid).upper() if uuid else None
 
     @classmethod
     def from_dict(cls, data: dict) -> "NodeConfig":
@@ -215,6 +298,7 @@ class NodeConfig:
             address=addr,
             image_path=data.get("image", ""),
             enabled=data.get("enabled", True),
+            uuid=data.get("uuid"),
         )
 
 
@@ -273,6 +357,21 @@ class MultidropFlasher:
     def __init__(self, transport: BaseBusTransport, config: MultidropConfig):
         self.transport = transport
         self.config = config
+
+    def get_node_uuid(self, addr: int) -> Optional[str]:
+        """Query Katapult 6-byte CAN UUID via CMD_GET_CANBUS_ID (0x16)."""
+        p, _ = self.transport.exchange(addr, CMD_GET_CANBUS_ID, wait=0.03, rd_len=32)
+        if p and p.get("cmd") == 0xA0:
+            payload = p.get("payload", b"")
+            if len(payload) >= 14:
+                uuid_bytes = payload[8:14]
+                return uuid_bytes.hex().upper()
+        return None
+
+    def send_dynamic_address_handoff(self, addr: int, new_address: int, bus_type: int = 0) -> bool:
+        """Send SoftResetMailbox payload to synchronize dynamic bus address across soft reset."""
+        mailbox = make_soft_reset_mailbox(REQUEST_CANBOOT, new_address, bus_type)
+        return self.transport.write_raw(addr, mailbox)
 
     def preflight_inventory(self, active_nodes: List[NodeConfig]) -> Dict[str, bool]:
         """Perform non-destructive bus discovery across all configured addresses."""
@@ -349,6 +448,13 @@ class MultidropFlasher:
         block_size = int.from_bytes(payload[12:16], "little")
         mcu_name = payload[16:].split(b"\0")[0].decode(errors="replace")
         print(f"  Target details: MCU={mcu_name}, AppBase=0x{app_base:08X}, BlockSize={block_size}")
+
+        node_uuid = self.get_node_uuid(node.address)
+        if node_uuid:
+            print(f"  Katapult UUID: {node_uuid}")
+            if node.uuid and node.uuid != node_uuid:
+                print(f"  ERROR: UUID mismatch! Expected {node.uuid}, got {node_uuid}")
+                return False
 
         if block_size == 0 or (block_size & (block_size - 1)) != 0:
             block_size = 64

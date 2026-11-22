@@ -68,6 +68,44 @@ static uint8_t transmit_max;
 static volatile uint8_t rstact_pending;
 static uint8_t last_ccc_code;
 
+#ifndef UID_BASE
+#define UID_BASE 0x08FFF800UL
+#endif
+
+#define SOFT_RESET_MAILBOX_ADDR 0x20007FE0
+#ifndef REQUEST_CANBOOT
+#define REQUEST_CANBOOT 0x5984E3FA6CA1589BULL
+#endif
+#ifndef REQUEST_APP
+#define REQUEST_APP     0x4649534841505031ULL
+#endif
+
+struct soft_reset_mailbox {
+    uint64_t magic;
+    uint8_t dynamic_node_id;
+    uint8_t bus_type;
+    uint16_t flags;
+    uint32_t can_assigned_id;
+    uint32_t reserved[3];
+    uint32_t crc32;
+};
+
+static uint32_t
+calc_crc32(const uint8_t *data, uint32_t len)
+{
+    uint32_t crc = 0xFFFFFFFF;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; b++) {
+            if (crc & 1)
+                crc = (crc >> 1) ^ 0xEDB88320;
+            else
+                crc >>= 1;
+        }
+    }
+    return ~crc;
+}
+
 #define FLASH_STORAGE_MAGIC 0x46495348 // "FISH"
 #define FLASH_SECTOR_14_ADDR 0x0801C000
 #define FLASH_SECTOR_15_ADDR 0x0801E000
@@ -86,6 +124,19 @@ struct flash_sector_header {
 static uint8_t
 read_configured_node_id(void)
 {
+    // Tier 1: Soft-Reset RAM Mailbox at 0x2000_7FE0
+    const struct soft_reset_mailbox *mb =
+        (const struct soft_reset_mailbox *)SOFT_RESET_MAILBOX_ADDR;
+    if (calc_crc32((const uint8_t *)mb, 28) == mb->crc32) {
+        if (mb->magic == REQUEST_CANBOOT || mb->magic == REQUEST_APP) {
+            uint8_t mb_id = mb->dynamic_node_id;
+            if (mb_id >= 0x08 && mb_id <= 0x77) {
+                return mb_id;
+            }
+        }
+    }
+
+    // Tier 2: Persistent Flash Sectors 14 and 15
     const struct flash_sector_header *h14 =
         (const struct flash_sector_header *)FLASH_SECTOR_14_ADDR;
     const struct flash_sector_header *h15 =
@@ -113,11 +164,9 @@ read_configured_node_id(void)
         }
     }
 
-#ifdef CONFIG_I2C_TARGET_ADDRESS
-    return CONFIG_I2C_TARGET_ADDRESS;
-#else
-    return 0x40;
-#endif
+    // Tier 3: Deterministic fallback address calculation from silicon UID
+    const uint32_t *uid = (const uint32_t *)UID_BASE;
+    return (uint8_t)(0x10 + ((uid[0] ^ uid[1] ^ uid[2]) & 0x3F));
 }
 
 static void switch_to_i3c(void);
@@ -244,7 +293,20 @@ I3C2_EV_IRQHandler(void)
             rstact_pending = 0;
             if (data == RSTACT_DEF_TGT_RESET) {
                 // Keep the bootloader resident across the system reset:
-                // the mailbox at the initial SP is checked after reboot.
+                // Preserve active dynamic node ID and bus type in RAM mailbox
+                struct soft_reset_mailbox *mb =
+                    (struct soft_reset_mailbox *)SOFT_RESET_MAILBOX_ADDR;
+                uint8_t cur_addr = read_configured_node_id();
+                mb->magic = REQUEST_CANBOOT;
+                mb->dynamic_node_id = cur_addr;
+                mb->bus_type = 1; // I3C
+                mb->flags = 0;
+                mb->can_assigned_id = 0;
+                mb->reserved[0] = 0;
+                mb->reserved[1] = 0;
+                mb->reserved[2] = 0;
+                mb->crc32 = calc_crc32((const uint8_t *)mb, 28);
+
                 set_bootup_code(REQUEST_CANBOOT);
                 irq_disable();
                 NVIC_SystemReset();
@@ -311,11 +373,15 @@ switch_to_i3c(void)
 
     // Initialize I3C2 peripheral as Target (PB3/PB4 AF3 maps to I3C2 on H503)
     uint8_t target_addr = read_configured_node_id();
+    const uint32_t *uid = (const uint32_t *)UID_BASE;
+    uint32_t instance_id = (uid[0] ^ uid[1] ^ uid[2]) & 0x0F;
+
     I3C2->CFGR = 0;
     I3C2->CFGR = I3C_CFGR_RSTPTRN | I3C_CFGR_EXITPTRN;
     I3C2->BCR = 0x06;
     I3C2->DCR = 0x63;
-    I3C2->EPIDR = (0x0114 << 16) | 0x0001;
+    I3C2->EPIDR = (0x0114UL << I3C_EPIDR_MIPIMID_Pos) |
+                  (instance_id << I3C_EPIDR_MIPIID_Pos) | 0x0001;
     I3C2->DEVR0 = ((target_addr & 0x7F) << 1) | I3C_DEVR0_DAVAL;
     I3C2->MAXRLR = MESSAGE_MAX;
     I3C2->MAXWLR = MESSAGE_MAX;

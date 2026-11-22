@@ -70,14 +70,50 @@ check_double_reset(void)
     return 0;
 }
 
+#define SOFT_RESET_MAILBOX_ADDR 0x20007FE0
+
+struct soft_reset_mailbox {
+    uint64_t magic;
+    uint8_t dynamic_node_id;
+    uint8_t bus_type;
+    uint16_t flags;
+    uint32_t can_assigned_id;
+    uint32_t reserved[3];
+    uint32_t crc32;
+};
+
+static uint32_t
+calc_crc32(const uint8_t *data, uint32_t len)
+{
+    uint32_t crc = 0xFFFFFFFF;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; b++) {
+            if (crc & 1)
+                crc = (crc >> 1) ^ 0xEDB88320;
+            else
+                crc >>= 1;
+        }
+    }
+    return ~crc;
+}
+
 // Check if bootloader or application should be started
 int
 bootentry_check(void)
 {
     // Enter the bootloader in the following conditions:
-    // - The request signature is set in memory (request from app)
+    // - The request signature is set in memory (request from app via mailbox or stack)
     // - No application code is present
     uint64_t bootup_code = get_bootup_code();
+    const struct soft_reset_mailbox *mb =
+        (const struct soft_reset_mailbox *)SOFT_RESET_MAILBOX_ADDR;
+    if (calc_crc32((const uint8_t *)mb, 28) == mb->crc32) {
+        if (mb->magic == REQUEST_CANBOOT) {
+            bootup_code = REQUEST_CANBOOT;
+        }
+    }
+
     if (bootup_code == REQUEST_CANBOOT || !application_check_valid()
         || check_button_pressed()) {
         // Start bootloader main loop indefinitely

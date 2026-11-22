@@ -8,6 +8,7 @@ and readback verification across a simulated shared multidrop bus.
 
 import hashlib
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -19,7 +20,16 @@ from multidrop_flashtool import (
     MultidropConfig,
     MultidropFlasher,
     NodeConfig,
+    REQUEST_CANBOOT,
+    REQUEST_APP,
+    KATAPULT_UUID_SEED,
+    CMD_GET_CANBUS_ID,
     crc16,
+    fasthash64,
+    katapult_can_uuid,
+    fallback_address,
+    make_soft_reset_mailbox,
+    parse_soft_reset_mailbox,
     make_frame,
     parse_frame,
 )
@@ -31,11 +41,12 @@ class MockDeviceNode:
     STATE_APP = 1
     STATE_BOOTLOADER = 2
 
-    def __init__(self, address: int, app_base: int = 0x08002000, block_size: int = 64, mcu: str = "stm32h503xx"):
+    def __init__(self, address: int, app_base: int = 0x08002000, block_size: int = 64, mcu: str = "stm32h503xx", uid: Optional[bytes] = None):
         self.address = address
         self.app_base = app_base
         self.block_size = block_size
         self.mcu = mcu
+        self.uid = uid or bytes([(address + i) & 0xFF for i in range(12)])
         self.state = self.STATE_APP
         self.ram_mailbox = 0
         self.flash_memory = bytearray(32 * 1024)  # 32 KB simulated flash
@@ -50,8 +61,17 @@ class MockDeviceNode:
 
         # In-band entry strobe: single byte 0xF0
         if data == ENTRY_STROBE_BYTE:
-            self.ram_mailbox = 0x5984E3FA6CA1589B
+            self.ram_mailbox = REQUEST_CANBOOT
             self.state = self.STATE_BOOTLOADER
+            return True
+
+        # Check for 32-byte SoftResetMailbox
+        mb = parse_soft_reset_mailbox(data)
+        if mb:
+            self.ram_mailbox = mb["magic"]
+            self.address = mb["dynamic_node_id"]
+            if mb["magic"] == REQUEST_CANBOOT:
+                self.state = self.STATE_BOOTLOADER
             return True
 
         if self.state == self.STATE_APP:
@@ -91,6 +111,9 @@ class MockDeviceNode:
         elif cmd == 0x15:  # COMPLETE
             self.is_completed = True
             self.state = self.STATE_APP  # Boot into new app
+            return True
+
+        elif cmd == CMD_GET_CANBUS_ID:
             return True
 
         return False
@@ -138,6 +161,14 @@ class MockDeviceNode:
                 # Corrupt one byte to simulate flash write error
                 block_data = bytes([block_data[0] ^ 0xFF]) + block_data[1:]
             payload = (0x14).to_bytes(4, "little") + addr.to_bytes(4, "little") + block_data
+            return make_frame(0xA0, payload)
+
+        elif last_cmd == CMD_GET_CANBUS_ID:
+            out = bytearray(20)
+            out[0:4] = (CMD_GET_CANBUS_ID).to_bytes(4, "little")
+            out[4:8] = (0).to_bytes(4, "little")
+            out[8:14] = katapult_can_uuid(self.uid)
+            return make_frame(0xA0, bytes(out))
             return make_frame(0xA0, payload)
 
         elif last_cmd == 0x15:  # ACK to COMPLETE
@@ -317,6 +348,61 @@ class MultidropFlasherSimulationTest(unittest.TestCase):
         self.assertEqual(self.node_pitch.received_blocks, 4)
         self.assertTrue(self.node_pitch.is_completed)
         self.assertEqual(self.node_roll.received_blocks, 0)
+
+    def test_fasthash64_and_katapult_uuid(self):
+        """Verifies FastHash64 and Katapult 6-byte CAN UUID calculation."""
+        uid = bytes([0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44])
+        h = fasthash64(uid, KATAPULT_UUID_SEED)
+        self.assertNotEqual(h, 0)
+        uuid = katapult_can_uuid(uid)
+        self.assertEqual(len(uuid), 6)
+        expected_uuid = struct.pack("<Q", h)[:6]
+        self.assertEqual(uuid, expected_uuid)
+
+    def test_soft_reset_mailbox_roundtrip_and_crc(self):
+        """Verifies SoftResetMailbox packing, CRC32 integrity, and parsing."""
+        raw = make_soft_reset_mailbox(REQUEST_CANBOOT, 0x42, bus_type=1)
+        self.assertEqual(len(raw), 32)
+
+        mb = parse_soft_reset_mailbox(raw)
+        self.assertIsNotNone(mb)
+        self.assertEqual(mb["magic"], REQUEST_CANBOOT)
+        self.assertEqual(mb["dynamic_node_id"], 0x42)
+        self.assertEqual(mb["bus_type"], 1)
+
+        # Corrupted payload fails CRC
+        corrupted = bytearray(raw)
+        corrupted[8] ^= 0xFF
+        self.assertIsNone(parse_soft_reset_mailbox(bytes(corrupted)))
+
+    def test_fallback_address(self):
+        """Verifies fallback address calculation bounded to 0x10..=0x4F."""
+        addr1 = fallback_address([0x00112233, 0x44556677, 0x8899AABB])
+        self.assertTrue(0x10 <= addr1 <= 0x4F)
+
+        addr_zero = fallback_address([0, 0, 0])
+        self.assertEqual(addr_zero, 0x10)
+
+        addr_max = fallback_address([0xFFFFFFFF, 0, 0])
+        self.assertEqual(addr_max, 0x10 + 0x3F)
+
+    def test_uuid_query_and_verification(self):
+        """Verifies querying Katapult UUID via flashtool and checking match."""
+        flasher = MultidropFlasher(self.bus, self.config)
+        self.node_yaw.state = MockDeviceNode.STATE_BOOTLOADER
+        uuid = flasher.get_node_uuid(self.node_yaw.address)
+        self.assertIsNotNone(uuid)
+        expected_uuid = katapult_can_uuid(self.node_yaw.uid).hex().upper()
+        self.assertEqual(uuid, expected_uuid)
+
+    def test_dynamic_address_handoff(self):
+        """Verifies soft-reset dynamic address handoff using SoftResetMailbox."""
+        flasher = MultidropFlasher(self.bus, self.config)
+        ok = flasher.send_dynamic_address_handoff(self.node_yaw.address, new_address=0x55, bus_type=1)
+        self.assertTrue(ok)
+        self.assertEqual(self.node_yaw.ram_mailbox, REQUEST_CANBOOT)
+        self.assertEqual(self.node_yaw.address, 0x55)
+        self.assertEqual(self.node_yaw.state, MockDeviceNode.STATE_BOOTLOADER)
 
 
 if __name__ == "__main__":
