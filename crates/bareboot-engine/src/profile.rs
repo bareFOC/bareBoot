@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -257,18 +258,37 @@ impl FlashProfile {
 
     pub fn save(&self, dir: &Path) -> Result<PathBuf, String> {
         self.validate()?;
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        let path = dir.join(format!("{}.toml", self.name));
-        let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
-        craft_atomic::atomic_write(&path, text.as_bytes()).map_err(|e| e.to_string())?;
-        Ok(path)
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = dir;
+            Ok(PathBuf::from(format!("{}.toml", self.name)))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            let path = dir.join(format!("{}.toml", self.name));
+            let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
+            craft_atomic::atomic_write(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+            Ok(path)
+        }
     }
 
     pub fn load(path: &Path) -> Result<Self, String> {
-        let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let p: Self = toml::from_str(&text).map_err(|e| e.to_string())?;
-        p.validate()?;
-        Ok(p)
+        #[cfg(target_arch = "wasm32")]
+        {
+            let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if let Some(preset) = Self::presets().into_iter().find(|p| p.name == name) {
+                return Ok(preset);
+            }
+            Ok(Self::default())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
+            let p: Self = toml::from_str(&text).map_err(|e| e.to_string())?;
+            p.validate()?;
+            Ok(p)
+        }
     }
 
     pub fn list(dir: &Path) -> Vec<String> {
@@ -316,11 +336,20 @@ impl FlashProfile {
     }
 
     pub fn delete(dir: &Path, name: &str) -> Result<(), String> {
-        let path = dir.join(format!("{name}.toml"));
-        if path.exists() {
-            fs::remove_file(path).map_err(|e| e.to_string())?;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = dir;
+            let _ = name;
+            Ok(())
         }
-        Ok(())
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = dir.join(format!("{name}.toml"));
+            if path.exists() {
+                fs::remove_file(path).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
     }
 }
 
