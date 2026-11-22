@@ -272,31 +272,47 @@ impl FlashProfile {
     }
 
     pub fn list(dir: &Path) -> Vec<String> {
-        let mut out = Vec::new();
-        if let Ok(entries) = fs::read_dir(dir) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.extension().and_then(|s| s.to_str()) == Some("toml") {
-                    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                        out.push(stem.to_string());
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = dir;
+            return Self::presets().into_iter().map(|p| p.name).collect();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut out = Vec::new();
+            if let Ok(entries) = fs::read_dir(dir) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p.extension().and_then(|s| s.to_str()) == Some("toml") {
+                        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                            out.push(stem.to_string());
+                        }
                     }
                 }
             }
+            out.sort();
+            out
         }
-        out.sort();
-        out
     }
 
     pub fn ensure_presets(dir: &Path) -> Result<Vec<String>, String> {
-        let existing = Self::list(dir);
-        if !existing.is_empty() {
-            return Ok(existing);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = dir;
+            return Ok(Self::presets().into_iter().map(|p| p.name).collect());
         }
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        for preset in Self::presets() {
-            let _ = preset.save(dir)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let existing = Self::list(dir);
+            if !existing.is_empty() {
+                return Ok(existing);
+            }
+            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            for preset in Self::presets() {
+                let _ = preset.save(dir)?;
+            }
+            Ok(Self::list(dir))
         }
-        Ok(Self::list(dir))
     }
 
     pub fn delete(dir: &Path, name: &str) -> Result<(), String> {

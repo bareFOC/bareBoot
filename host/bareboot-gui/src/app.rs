@@ -179,6 +179,7 @@ impl BarebootApp {
     }
 
     fn process_events(&mut self) {
+        self.worker.poll();
         while let Ok(evt) = self.worker.event_rx.try_recv() {
             match evt {
                 UiEvent::BusNode { name, uuid } => {
