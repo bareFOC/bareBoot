@@ -38,17 +38,27 @@ impl PanelId {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MobileTab {
+pub enum WorkbenchTab {
     Flasher,
     Config,
-    Docs,
+    Console,
     Traffic,
+    Docs,
+}
+
+pub type MobileTab = WorkbenchTab;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewMode {
+    Tabbed,
+    Docked,
 }
 
 pub struct BarebootApp {
     pub worker: WorkerHandles,
     pub dock_layout: Layout<PanelId>,
-    pub mobile_tab: MobileTab,
+    pub active_tab: WorkbenchTab,
+    pub view_mode: ViewMode,
 
     pub active_profile: FlashProfile,
     pub active_config: BarebootConfig,
@@ -105,7 +115,8 @@ impl BarebootApp {
         Self {
             worker,
             dock_layout,
-            mobile_tab: MobileTab::Flasher,
+            active_tab: WorkbenchTab::Flasher,
+            view_mode: ViewMode::Tabbed,
 
             active_profile,
             active_config,
@@ -414,46 +425,63 @@ impl eframe::App for BarebootApp {
                         ui.colored_label(Color32::from_rgb(100, 255, 120), "READY");
                     }
                     ui.label(&self.status_msg);
+
+                    ui.separator();
+                    ui.selectable_value(&mut self.view_mode, ViewMode::Docked, "Docked");
+                    ui.selectable_value(&mut self.view_mode, ViewMode::Tabbed, "Tabbed");
+                    ui.label(RichText::new("Layout:").strong());
                 });
             });
         });
 
-        // Viewport check: if viewport width < 900px, adapt into mobile tabbed layout
-        let screen_width = ui.available_width();
-        if screen_width < 900.0 {
-            // Mobile viewport layout
-            Panel::top("mobile_tab_bar").show(ui, |ui| {
+        // Tabbed View (active by default across all orientations, with landscape responsive columns)
+        if self.view_mode == ViewMode::Tabbed {
+            Panel::top("workbench_tab_bar").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let tabs = [
-                        (MobileTab::Flasher, "Flasher"),
-                        (MobileTab::Config, "Config"),
-                        (MobileTab::Docs, "Manuals"),
-                        (MobileTab::Traffic, "Traffic"),
+                        (WorkbenchTab::Flasher, "Flasher"),
+                        (WorkbenchTab::Config, "Target Config"),
+                        (WorkbenchTab::Console, "Build Console"),
+                        (WorkbenchTab::Traffic, "Bus Traffic"),
+                        (WorkbenchTab::Docs, "Manuals"),
                     ];
                     for (tab, label) in tabs {
-                        let active = self.mobile_tab == tab;
-                        if ui.selectable_label(active, label).clicked() {
-                            self.mobile_tab = tab;
+                        let active = self.active_tab == tab;
+                        if ui.selectable_label(active, RichText::new(label).strong()).clicked() {
+                            self.active_tab = tab;
                         }
                     }
                 });
             });
 
             CentralPanel::default().show(ui, |ui| {
-                match self.mobile_tab {
-                    MobileTab::Flasher => {
-                        self.render_panel_body(ui, &PanelId::MakeflashControl);
-                        ui.separator();
-                        self.render_panel_body(ui, &PanelId::BuildConsole);
+                match self.active_tab {
+                    WorkbenchTab::Flasher => {
+                        let width = ui.available_width();
+                        if width >= 850.0 {
+                            // Landscape dual-column view: Pipeline controls on the left, live build console on the right
+                            ui.columns(2, |cols| {
+                                self.render_panel_body(&mut cols[0], &PanelId::MakeflashControl);
+                                self.render_panel_body(&mut cols[1], &PanelId::BuildConsole);
+                            });
+                        } else {
+                            // Narrow portrait view: stacked with separator
+                            self.render_panel_body(ui, &PanelId::MakeflashControl);
+                            ui.separator();
+                            self.render_panel_body(ui, &PanelId::BuildConsole);
+                        }
                     }
-                    MobileTab::Config => {
+                    WorkbenchTab::Config => {
                         self.render_panel_body(ui, &PanelId::TargetConfig);
                     }
-                    MobileTab::Docs => {
-                        self.render_panel_body(ui, &PanelId::Documentation);
+                    WorkbenchTab::Console => {
+                        self.render_panel_body(ui, &PanelId::BuildConsole);
                     }
-                    MobileTab::Traffic => {
+                    WorkbenchTab::Traffic => {
                         self.render_panel_body(ui, &PanelId::BusTraffic);
+                    }
+                    WorkbenchTab::Docs => {
+                        self.render_panel_body(ui, &PanelId::Documentation);
                     }
                 }
             });
@@ -490,6 +518,21 @@ impl eframe::App for BarebootApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_workbench_tabbed_view_modes() {
+        assert_eq!(ViewMode::Tabbed, ViewMode::Tabbed);
+        assert_ne!(ViewMode::Tabbed, ViewMode::Docked);
+
+        let tabs = [
+            WorkbenchTab::Flasher,
+            WorkbenchTab::Config,
+            WorkbenchTab::Console,
+            WorkbenchTab::Traffic,
+            WorkbenchTab::Docs,
+        ];
+        assert_eq!(tabs.len(), 5);
+    }
 
     #[test]
     fn test_dock_layout_initialization() {

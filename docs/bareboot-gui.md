@@ -40,19 +40,20 @@ The workbench is built on a 100% Rust architecture:
 1. **`bareboot-engine` (`crates/bareboot-engine`)**:
    Headless background execution service extracted from the TUI. Owns background thread orchestration (`WorkerHandles`), non-blocking command and event channels (`WorkerCommand`, `UiEvent`), atomic profile loading/saving (`craft-atomic`), target compilation (`stream_cargo_build`, `stream_makeflash`), and SWD/JTAG operations (`probe-rs`).
 
-2. **`craft-ui` Docking Layout**:
-   On desktop viewports (width >= 900px), panels are organized using `craft_ui::docking::DockArea`:
+2. **Tabbed View (Default Across Landscape & Portrait)**:
+   The workbench defaults to a clean, focused tabbed interface across all screen sizes and orientations:
+   - **`Flasher`**: Makeflash pipeline and live build console. In landscape orientation (width >= 850px), controls and logs are displayed side-by-side in dual responsive columns; in narrow portrait orientation, they stack vertically.
+   - **`Target Config`**: Visual target configuration, parameter tuning, and atomic profile manager.
+   - **`Build Console`**: Dedicated full-width / full-height cargo compilation diagnostics and real-time log streamer.
+   - **`Bus Traffic`**: Real-time Katapult frame sniffer, active bus nodes inspector, and packet filter.
+   - **`Manuals`**: Offline documentation and target hardware pinout viewer.
+
+3. **`craft-ui` Docking Layout (Optional)**:
+   Users can toggle to a multi-pane docked layout via the `Layout: [Tabbed] [Docked]` switcher in the header bar:
    - **Left**: Target Configuration & Profile Inspector.
    - **Center-Top**: Katapult Makeflash Pipeline & Progress Gauge.
    - **Center-Bottom**: Cargo Build & Diagnostics Console.
    - **Right**: Live Bus Traffic Sniffer & Packet Analyzer (tabbed with In-App Documentation).
-
-3. **Mobile Responsive Viewport**:
-   When viewport width is under 900px (Android tablets, phones, narrow windows), the dock collapses into a streamlined four-tab interface:
-   - `Flasher`: Makeflash controls, progress gauge, and build console.
-   - `Config`: Visual target parameters and profile editor.
-   - `Manuals`: Offline documentation and pinout reference viewer.
-   - `Traffic`: Real-time packet capture table and active bus nodes.
 
 4. **In-App Documentation & Manual Viewer**:
    Bundles all architecture guides, handsfree update specifications, protocol opcode definitions, and hardware pinout tables directly within the binary for offline access in field environments.
