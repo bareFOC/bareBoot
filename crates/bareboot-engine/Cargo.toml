@@ -1,0 +1,14 @@
+[package]
+name = "bareboot-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless background execution and profile engine for BareBoot"
+
+[dependencies]
+bareboot-client = { path = "../../host/bareboot-client" }
+bareboot-protocol = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+craft-settings = "1.4.7"
+craft-atomic = "1.4.7"

@@ -1,28 +1,11 @@
-use bareboot_client::{BarebootConfig, parse_config};
-use std::fs;
-use std::path::Path;
-
-pub fn load_config(path: &Path) -> Result<BarebootConfig, String> {
-    let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let config = parse_config(&text).map_err(|e| e.to_string())?;
-    config.validate().map_err(|e| e.to_string())?;
-    Ok(config)
-}
-
-pub fn save_config(path: &Path, config: &BarebootConfig) -> Result<(), String> {
-    config.validate().map_err(|e| e.to_string())?;
-    let text = format!(
-        "target = \"{}\"\ntransport = \"{}\"\nboot_window_ms = {}\n",
-        config.target, config.transport, config.boot_window_ms
-    );
-    fs::write(path, text).map_err(|e| e.to_string())
-}
+pub use bareboot_engine::config::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use bareboot_client::BarebootConfig;
     use std::env;
+    use std::fs;
 
     #[test]
     fn round_trip() {

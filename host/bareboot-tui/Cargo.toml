@@ -7,6 +7,7 @@ description = "Interactive terminal cockpit for BareBoot"
 
 [dependencies]
 bareboot-client = { path = "../bareboot-client" }
+bareboot-engine = { path = "../../crates/bareboot-engine" }
 ratatui = "0.30"
 ratatui-braille-bar = "0.3"
 crossterm = "0.28"

@@ -5,6 +5,8 @@ pub mod flash_runner;
 pub mod framing;
 pub mod session;
 pub mod transport;
+pub mod android_usb;
+pub mod web_serial;
 
 #[cfg(target_os = "linux")]
 pub mod serial;
@@ -19,6 +21,8 @@ pub use error::HostError;
 pub use flash_runner::run_flash;
 pub use session::{ConnectInfo, FlashSession};
 pub use transport::{HostBus, InMemoryBus};
+pub use android_usb::AndroidUsbBus;
+pub use web_serial::WebSerialBus;
 #[cfg(target_os = "linux")]
 pub use can::SocketCanBus;
 #[cfg(target_os = "linux")]

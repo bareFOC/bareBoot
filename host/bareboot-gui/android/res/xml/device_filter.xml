@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- USB CDC-ACM Serial Devices -->
+    <usb-device class="2" />
+    <!-- Vendor-specific USB CAN dongles and bootloaders (RP2350, CH32V, STM32) -->
+    <usb-device vendor-id="11914" /> <!-- Raspberry Pi 0x2E8A -->
+    <usb-device vendor-id="6790" />  <!-- WCH 0x1A86 -->
+    <usb-device vendor-id="1155" />  <!-- STMicroelectronics 0x0483 -->
+</resources>
