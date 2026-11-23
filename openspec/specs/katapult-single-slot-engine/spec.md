@@ -33,7 +33,7 @@ The bootloader SHALL strictly bound all flash erase and program operations to th
 - **THEN** previously persisted configuration data in NVM remains identical and valid
 
 ### Requirement: Monotonic Bit-Flip Commit Record Tracking
-The bootloader SHALL persist application update states within a dedicated commit flash sector using sequential monotonic bit-flipping writes without erasing the sector during state transitions.
+The bootloader SHALL persist application update states within a dedicated commit flash sector using sequential monotonic bit-flipping writes without erasing the sector during state transitions across all supported MCU platforms including STM32.
 
 #### Scenario: Update initiated marks in progress
 - **WHEN** the first block of an update is written
@@ -55,8 +55,12 @@ The bootloader SHALL feed active hardware watchdogs before and during every flas
 - **THEN** the hardware watchdog is serviced prior to each hardware flash operation, preventing watchdog resets
 
 ### Requirement: Safe Processor Handoff and Cache Invalidation
-The bootloader SHALL invalidate the processor instruction cache and de-initialize active communication peripherals before branching to the application.
+The bootloader SHALL invalidate the processor instruction cache, verify application vector validity including reset entry opcodes, and de-initialize active communication peripherals before branching to the application.
 
 #### Scenario: Application jump on Cortex-M7 and Cortex-M33
 - **WHEN** the boot decision selects application launch
 - **THEN** the bootloader invalidates the instruction cache, updates the vector table offset register, and executes the application entry vector
+
+#### Scenario: Torn application entry point rejected
+- **WHEN** the application initial SP and Reset PC are within bounds but the opcode at the Reset PC is unprogrammed `0xFFFFFFFF` or zeroed `0x00000000`
+- **THEN** the bootloader rejects the application as invalid and remains in bootloader recovery mode

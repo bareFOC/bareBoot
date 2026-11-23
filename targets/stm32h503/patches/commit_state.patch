@@ -1,0 +1,208 @@
+diff --git a/src/Makefile b/src/Makefile
+index 3df8c24..b4d53a7 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -1,6 +1,8 @@
+ # Main code build rules
+ 
+ src-y += sched.c bootentry.c command.c flashcmd.c initial_pins.c
++src-$(CONFIG_MACH_RP2350) += commit_state.c
++src-$(CONFIG_MACH_STM32) += commit_state.c
+ src-$(CONFIG_ENABLE_LED) += led.c
+ 
+ deployer-y += deployer.c
+diff --git a/src/generic/armcm_canboot.c b/src/generic/armcm_canboot.c
+index 5398bf1..a295bea 100644
+--- a/src/generic/armcm_canboot.c
++++ b/src/generic/armcm_canboot.c
+@@ -11,6 +11,7 @@
+ #include "board/irq.h" // irq_disable
+ #include "canboot.h" // get_bootup_code
+ #include "command.h" // DECL_CONSTANT_STR
++#include "commit_state.h" // commit_state_valid
+ 
+ // Export MCU type
+ DECL_CONSTANT_STR("MCU", CONFIG_MCU);
+@@ -78,10 +79,29 @@ application_check_valid(void)
+         return 0;
+ #if defined(CONFIG_FLASH_SIZE)
+     // 2. PC must lie within flash application region
+-    if (pc < CONFIG_LAUNCH_APP_ADDRESS || pc >= (CONFIG_FLASH_START + CONFIG_FLASH_SIZE))
++    if (pc < CONFIG_LAUNCH_APP_ADDRESS || pc >= (CONFIG_FLASH_START + CONFIG_FLASH_SIZE - 4))
+         return 0;
+ #endif
+ 
++    // Multi-Vector Verification: HardFault_Handler (app[3])
++    uint32_t hardfault = app[3];
++    if (hardfault == 0xffffffff || hardfault == 0 || (hardfault & 1) == 0)
++        return 0;
++#if defined(CONFIG_FLASH_SIZE)
++    if (hardfault < CONFIG_LAUNCH_APP_ADDRESS || hardfault >= (CONFIG_FLASH_START + CONFIG_FLASH_SIZE))
++        return 0;
++#endif
++
++    // Entry Opcode Sanity: Dereference first instruction opcode at pc & ~1
++    const volatile uint32_t *entry_code = (const volatile uint32_t *)(pc & ~1);
++    if (*entry_code == 0xffffffff || *entry_code == 0)
++        return 0;
++
++    // BareBoot: a committed (fully verified) update is required. A torn or
++    // interrupted transfer leaves UPDATE_IN_PROGRESS, which must never boot.
++    if (!commit_state_valid())
++        return 0;
++
+     return 1;
+ }
+ 
+diff --git a/src/stm32/flash.c b/src/stm32/flash.c
+index 93f591d..25b93ac 100644
+--- a/src/stm32/flash.c
++++ b/src/stm32/flash.c
+@@ -142,6 +142,8 @@ erase_page(uint32_t page_address)
+         ;
+     SCB_InvalidateDCache_by_Addr((void*)page_address, 128*1024);
+ #elif CONFIG_MACH_STM32H5
++    FLASH->CCR = FLASH_CCR_CLR_EOP | FLASH_CCR_CLR_WRPERR | FLASH_CCR_CLR_PGSERR
++                 | FLASH_CCR_CLR_STRBERR | FLASH_CCR_CLR_INCERR;
+     uint32_t cr = FLASH_CR_SER | FLASH_CR_START;
+     uint32_t snb;
+     if (page_address >= 0x08010000) {
+@@ -216,8 +218,56 @@ write_block(uint32_t block_address, uint32_t *data)
+ }
+ 
+ static uint32_t page_write_count;
++static uint32_t erased_pages[64];
++static uint8_t num_erased_pages;
++
++void
++flash_erase_page_raw(uint32_t page_address)
++{
++    unlock_flash();
++    erase_page(page_address);
++#if CONFIG_MACH_STM32H7
++    lock_flash();
++    unlock_flash();
++#endif
++    lock_flash();
++}
+ 
+-// Main block write interface
++void
++flash_write_record_raw(uint32_t addr, const uint32_t *words, uint32_t count)
++{
++    unlock_flash();
++#if CONFIG_MACH_STM32H5
++    uint32_t *page = (void*)addr;
++    FLASH->CR |= FLASH_CR_PG;
++    for (uint32_t i = 0; i < count; i += 4) {
++        page[i + 0] = words[i + 0];
++        page[i + 1] = words[i + 1];
++        page[i + 2] = words[i + 2];
++        page[i + 3] = words[i + 3];
++        wait_flash();
++    }
++    FLASH->CR &= ~FLASH_CR_PG;
++#elif CONFIG_MACH_STM32G0 || CONFIG_MACH_STM32G4
++    uint32_t *page = (void*)addr;
++    FLASH->CR = FLASH_CR_PG;
++    for (uint32_t i = 0; i < count; i += 2) {
++        writel(&page[i], words[i]);
++        writel(&page[i + 1], words[i + 1]);
++        wait_flash();
++    }
++#else
++    uint32_t *page = (void*)addr;
++    FLASH->CR = FLASH_CR_PG;
++    for (uint32_t i = 0; i < count; i++) {
++        writel(&page[i], words[i]);
++        wait_flash();
++    }
++#endif
++    lock_flash();
++}
++
++// Main block write interface supporting inverted block ordering
+ int
+ flash_write_block(uint32_t block_address, uint32_t *data)
+ {
+@@ -227,43 +277,43 @@ flash_write_block(uint32_t block_address, uint32_t *data)
+     uint32_t flash_page_size = flash_get_page_size(block_address);
+     uint32_t page_address = ALIGN_DOWN(block_address, flash_page_size);
+ 
+-    // Check if erase is needed
+-    int need_erase = 0;
+-    if (page_address == block_address) {
+-        if (check_erased(block_address, flash_page_size)) {
+-            // Page already erased
+-        } else if (memcmp(data, (void*)block_address, CONFIG_BLOCK_SIZE) == 0
+-                   && check_erased(block_address + CONFIG_BLOCK_SIZE
+-                                   , flash_page_size - CONFIG_BLOCK_SIZE)) {
+-            // Retransmitted request - just ignore
+-            return 0;
+-        } else {
+-            need_erase = 1;
+-        }
+-        page_write_count++;
+-    } else {
+-        if (!check_erased(block_address, CONFIG_BLOCK_SIZE)) {
+-            if (memcmp(data, (void*)block_address, CONFIG_BLOCK_SIZE) == 0)
+-                // Retransmitted request - just ignore
+-                return 0;
+-            // Block not erased - out of order request?
+-            return -2;
++    // Track erased pages in the current transfer so out-of-order writes
++    // (such as writing Block 0 last) never trigger an accidental re-erase
++    // or fail due to out-of-order sector arrival.
++    int already_erased = 0;
++    for (uint8_t i = 0; i < num_erased_pages; i++) {
++        if (erased_pages[i] == page_address) {
++            already_erased = 1;
++            break;
+         }
+     }
+ 
+-    // make sure flash is unlocked
+-    unlock_flash();
+-
+-    // Erase page
+-    if (need_erase) {
+-        erase_page(page_address);
+-
+-        // avoid triggering STM32H72xx write security
+-        if (CONFIG_MACH_STM32H7) {
++    if (!already_erased) {
++        if (!check_erased(page_address, flash_page_size)) {
++            unlock_flash();
++            erase_page(page_address);
++#if CONFIG_MACH_STM32H7
+             lock_flash();
+             unlock_flash();
++#endif
++            lock_flash();
+         }
++        if (num_erased_pages < ARRAY_SIZE(erased_pages)) {
++            erased_pages[num_erased_pages++] = page_address;
++        }
++        page_write_count++;
+     }
++
++    // Check if target block is already written
++    if (!check_erased(block_address, CONFIG_BLOCK_SIZE)) {
++        if (memcmp(data, (void*)block_address, CONFIG_BLOCK_SIZE) == 0)
++            return 0; // Retransmitted request - just ignore
++        return -2;    // Block not erased
++    }
++
++    // make sure flash is unlocked
++    unlock_flash();
++
+     // Write block
+     write_block(block_address, data);
+ 
+@@ -280,5 +330,6 @@ flash_write_block(uint32_t block_address, uint32_t *data)
+ int
+ flash_complete(void)
+ {
++    num_erased_pages = 0;
+     return page_write_count;
+ }

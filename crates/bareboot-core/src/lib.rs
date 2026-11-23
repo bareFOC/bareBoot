@@ -99,6 +99,8 @@ pub fn check_and_clear_bootloader_request(mailbox_addr: usize) -> bool {
 /// - Initial Stack Pointer (SP) must be within plausible RAM boundaries and not blank (0xFFFFFFFF or 0).
 /// - Reset Vector (PC) must have Thumb bit set (for Cortex-M), must not be blank,
 ///   and must reside within the application flash boundary `[app_base, flash_end)`.
+/// - Entry opcode slice must contain at least 4 bytes and the 32-bit word at entry must not be
+///   unprogrammed (`0xFFFFFFFF`) or zeroed (`0x00000000`).
 pub fn validate_app_vector(
     sp: u32,
     pc: u32,
@@ -106,6 +108,7 @@ pub fn validate_app_vector(
     ram_end: u32,
     app_base: u32,
     flash_end: u32,
+    entry_opcode: &[u8],
 ) -> bool {
     if sp == 0 || sp == 0xFFFF_FFFF || pc == 0 || pc == 0xFFFF_FFFF {
         return false;
@@ -119,6 +122,18 @@ pub fn validate_app_vector(
     if pc < app_base || pc >= flash_end {
         return false;
     }
+    if entry_opcode.len() < 4 {
+        return false;
+    }
+    let entry = u32::from_le_bytes([
+        entry_opcode[0],
+        entry_opcode[1],
+        entry_opcode[2],
+        entry_opcode[3],
+    ]);
+    if entry == 0 || entry == 0xFFFF_FFFF {
+        return false;
+    }
     true
 }
 
@@ -127,7 +142,7 @@ pub fn validate_app_vector(
 ///
 /// Returns `true` if:
 /// - Mailbox token matches `REQUEST_BOOTLOADER` (handsfree request)
-/// - Application vector table is blank or invalid (failsafe blank-vector parking)
+/// - Application vector table or entry opcode is blank/invalid (failsafe blank-vector parking)
 pub fn should_park_in_bootloader(
     mailbox_request: bool,
     sp: u32,
@@ -136,8 +151,9 @@ pub fn should_park_in_bootloader(
     ram_end: u32,
     app_base: u32,
     flash_end: u32,
+    entry_opcode: &[u8],
 ) -> bool {
-    mailbox_request || !validate_app_vector(sp, pc, ram_start, ram_end, app_base, flash_end)
+    mailbox_request || !validate_app_vector(sp, pc, ram_start, ram_end, app_base, flash_end, entry_opcode)
 }
 
 
@@ -193,37 +209,52 @@ mod tests {
         const APP_BASE: u32 = 0x0800_2000;
         const FLASH_END: u32 = 0x0802_0000;
 
+        let valid_opcode = [0x80, 0xB5, 0x00, 0xAF]; // Valid push {r7, lr}, sub sp, #0
+        let blank_opcode = [0xFF, 0xFF, 0xFF, 0xFF]; // Blank/erased flash
+        let zero_opcode = [0x00, 0x00, 0x00, 0x00];  // Zeroed flash
+
         // Blank flash (unprogrammed sector 0xFFFFFFFF)
-        assert!(!validate_app_vector(0xFFFF_FFFF, 0xFFFF_FFFF, RAM_START, RAM_END, APP_BASE, FLASH_END));
-        assert!(should_park_in_bootloader(false, 0xFFFF_FFFF, 0xFFFF_FFFF, RAM_START, RAM_END, APP_BASE, FLASH_END));
+        assert!(!validate_app_vector(0xFFFF_FFFF, 0xFFFF_FFFF, RAM_START, RAM_END, APP_BASE, FLASH_END, &blank_opcode));
+        assert!(should_park_in_bootloader(false, 0xFFFF_FFFF, 0xFFFF_FFFF, RAM_START, RAM_END, APP_BASE, FLASH_END, &blank_opcode));
 
         // Zeroed flash
-        assert!(!validate_app_vector(0, 0, RAM_START, RAM_END, APP_BASE, FLASH_END));
-        assert!(should_park_in_bootloader(false, 0, 0, RAM_START, RAM_END, APP_BASE, FLASH_END));
+        assert!(!validate_app_vector(0, 0, RAM_START, RAM_END, APP_BASE, FLASH_END, &zero_opcode));
+        assert!(should_park_in_bootloader(false, 0, 0, RAM_START, RAM_END, APP_BASE, FLASH_END, &zero_opcode));
 
-        // Valid vector: SP in RAM, PC in app flash with Thumb bit set
+        // Valid vector: SP in RAM, PC in app flash with Thumb bit set, valid entry opcode
         let valid_sp = 0x2000_4000;
         let valid_pc = 0x0800_2101; // Thumb bit set (odd)
-        assert!(validate_app_vector(valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
-        assert!(!should_park_in_bootloader(false, valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
+        assert!(validate_app_vector(valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &valid_opcode));
+        assert!(!should_park_in_bootloader(false, valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &valid_opcode));
+
+        // Torn flash condition: Valid SP and PC, but entry code is blank (0xFFFFFFFF)
+        assert!(!validate_app_vector(valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &blank_opcode));
+        assert!(should_park_in_bootloader(false, valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &blank_opcode));
+
+        // Torn flash condition: Valid SP and PC, but entry code is zeroed (0x00000000)
+        assert!(!validate_app_vector(valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &zero_opcode));
+        assert!(should_park_in_bootloader(false, valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &zero_opcode));
+
+        // Truncated opcode slice (< 4 bytes)
+        assert!(!validate_app_vector(valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &[0x80, 0xB5]));
 
         // Valid vector with mailbox request: must park indefinitely
-        assert!(should_park_in_bootloader(true, valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
+        assert!(should_park_in_bootloader(true, valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &valid_opcode));
 
         // Invalid Thumb bit (even PC)
         let even_pc = 0x0800_2100;
-        assert!(!validate_app_vector(valid_sp, even_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
-        assert!(should_park_in_bootloader(false, valid_sp, even_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
+        assert!(!validate_app_vector(valid_sp, even_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &valid_opcode));
+        assert!(should_park_in_bootloader(false, valid_sp, even_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &valid_opcode));
 
         // Out of bounds PC (pointing to bootloader region < APP_BASE)
         let bl_pc = 0x0800_0101;
-        assert!(!validate_app_vector(valid_sp, bl_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
-        assert!(should_park_in_bootloader(false, valid_sp, bl_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
+        assert!(!validate_app_vector(valid_sp, bl_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &valid_opcode));
+        assert!(should_park_in_bootloader(false, valid_sp, bl_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &valid_opcode));
 
         // Out of bounds SP (pointing to flash)
         let bad_sp = 0x0800_3000;
-        assert!(!validate_app_vector(bad_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
-        assert!(should_park_in_bootloader(false, bad_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END));
+        assert!(!validate_app_vector(bad_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &valid_opcode));
+        assert!(should_park_in_bootloader(false, bad_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &valid_opcode));
     }
 }
 

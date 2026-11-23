@@ -170,16 +170,18 @@ class SimulatedFishyServoNode:
         self.mcu = "stm32h503xx"
         self.received_blocks: int = 0
         self.pending_jump: bool = False
+        self.commit_state: str = "VALID"
+        self.erased_in_transfer: set = set()
 
         # Mark bootloader sector as programmed
         self.flash.write_block(BOOTLOADER_BASE, b"\x00\x80\x00\x20\x09\x00\x00\x08" + b"\x55" * 56)
 
     def application_check_valid(self) -> bool:
         """Evaluate application vector table validity at APP_BASE (0x0800_2000)."""
-        vec_bytes = self.flash.read_range(APP_BASE, 8)
-        if len(vec_bytes) < 8:
+        vec_bytes = self.flash.read_range(APP_BASE, 16)
+        if len(vec_bytes) < 16:
             return False
-        sp, pc = struct.unpack("<II", vec_bytes)
+        sp, pc, nmi, hardfault = struct.unpack("<IIII", vec_bytes)
 
         # 1. Stack Pointer (SP) must be within valid SRAM boundaries
         if sp <= RAM_START or sp > RAM_LIMIT:
@@ -190,7 +192,26 @@ class SimulatedFishyServoNode:
             return False
 
         # 3. PC must lie within flash application region
-        if pc < APP_BASE or pc >= (FLASH_BASE + FLASH_TOTAL_SIZE):
+        if pc < APP_BASE or pc >= (FLASH_BASE + FLASH_TOTAL_SIZE - 4):
+            return False
+
+        # 4. Multi-Vector Verification: HardFault_Handler (app[3])
+        if hardfault == 0xFFFFFFFF or hardfault == 0 or (hardfault & 1) == 0:
+            return False
+        if hardfault < APP_BASE or hardfault >= (FLASH_BASE + FLASH_TOTAL_SIZE):
+            return False
+
+        # 5. Entry Opcode Sanity: Dereference first instruction opcode at pc & ~1
+        entry_addr = pc & ~1
+        entry_bytes = self.flash.read_range(entry_addr, 4)
+        if len(entry_bytes) < 4:
+            return False
+        entry_code = struct.unpack("<I", entry_bytes)[0]
+        if entry_code == 0xFFFFFFFF or entry_code == 0:
+            return False
+
+        # 6. Monotonic commit state verification
+        if self.commit_state != "VALID":
             return False
 
         return True
@@ -228,11 +249,13 @@ class SimulatedFishyServoNode:
         """Simulate physical power cycle / POR: RAM is cleared, BareBoot boots."""
         self.ram_mailbox = 0
         self.received_blocks = 0
+        self.erased_in_transfer.clear()
         self.bootentry_check(current_time)
 
     def reset_pulse(self, current_time: float):
         """Simulate reset line pulse / NVIC_SystemReset: RAM mailbox preserved."""
         self.received_blocks = 0
+        self.erased_in_transfer.clear()
         self.bootentry_check(current_time)
 
     def is_in_bootloader(self) -> bool:
@@ -286,10 +309,14 @@ class SimulatedFishyServoNode:
             if dest_addr < APP_BASE or (dest_addr + BLOCK_SIZE) > APP_LIMIT:
                 return False
 
+            if self.received_blocks == 0:
+                self.commit_state = "UPDATE_IN_PROGRESS"
+
             offset = dest_addr - FLASH_BASE
             sector_idx = offset // SECTOR_SIZE
-            if (offset % SECTOR_SIZE) == 0:
+            if sector_idx not in self.erased_in_transfer:
                 self.flash.erase_sector(sector_idx)
+                self.erased_in_transfer.add(sector_idx)
 
             ok = self.flash.write_block(dest_addr, block_data)
             if ok:
@@ -303,6 +330,8 @@ class SimulatedFishyServoNode:
             return True
 
         elif cmd == CMD_COMPLETE:
+            self.commit_state = "VALID"
+            self.erased_in_transfer.clear()
             self.pending_jump = True
             return True
 
@@ -412,15 +441,26 @@ class ProductionBusFlasher:
         return False
 
     def flash_image(self, image_bytes: bytes, verify: bool = True, abort_after_blocks: Optional[int] = None) -> bool:
-        """Stream blocks, verify readback, and complete transfer."""
+        """Stream blocks with inverted ordering (block 0 last), verify readback, and complete transfer."""
         num_blocks = (len(image_bytes) + self.block_size - 1) // self.block_size
         padded_len = num_blocks * self.block_size
         padded_data = image_bytes + b"\xFF" * (padded_len - len(image_bytes))
 
-        # Stream blocks
-        for i in range(num_blocks):
-            if abort_after_blocks is not None and i >= abort_after_blocks:
-                # Simulate torn/interrupted transfer mid-stream
+        # Inverted Flashtool Block Ordering:
+        # Write payload blocks (1..num_blocks-1) first. Block 0 (the vector table)
+        # is programmed strictly after all payload blocks have been transmitted and verified.
+        if num_blocks <= 1:
+            payload_indices = []
+            block_0_needed = True
+        else:
+            payload_indices = list(range(1, num_blocks))
+            block_0_needed = True
+
+        blocks_transmitted = 0
+
+        # 1. Stream payload blocks (1..num_blocks-1)
+        for i in payload_indices:
+            if abort_after_blocks is not None and blocks_transmitted >= abort_after_blocks:
                 return False
 
             target_addr = self.app_base + i * self.block_size
@@ -430,15 +470,11 @@ class ProductionBusFlasher:
             parsed, _ = self.bus.exchange(self.addr, CMD_BLOCK_WRITE, payload, read_len=32)
             if not parsed or parsed["cmd"] != RESP_ACK:
                 return False
+            blocks_transmitted += 1
 
-        # End-of-file flush
-        parsed_eof, _ = self.bus.exchange(self.addr, CMD_RX_EOF, read_len=32)
-        if not parsed_eof or parsed_eof["cmd"] != RESP_ACK:
-            return False
-
-        # Readback verification
-        if verify:
-            for bi in range(num_blocks):
+        # 2. Readback verification of payload blocks
+        if verify and payload_indices:
+            for bi in payload_indices:
                 target_addr = self.app_base + bi * self.block_size
                 payload = struct.pack("<I", target_addr)
                 parsed_rb, _ = self.bus.exchange(self.addr, CMD_REQ_BLOCK, payload, read_len=96)
@@ -449,6 +485,34 @@ class ProductionBusFlasher:
                 if got != exp:
                     return False
 
+        # 3. Write Block 0 (the vector table) last, after all payload blocks have been transmitted and verified!
+        if block_0_needed:
+            if abort_after_blocks is not None and blocks_transmitted >= abort_after_blocks:
+                return False
+
+            target_addr = self.app_base
+            blk_data = padded_data[:self.block_size]
+            payload = struct.pack("<I", target_addr) + blk_data
+
+            parsed, _ = self.bus.exchange(self.addr, CMD_BLOCK_WRITE, payload, read_len=32)
+            if not parsed or parsed["cmd"] != RESP_ACK:
+                return False
+            blocks_transmitted += 1
+
+            if verify:
+                payload = struct.pack("<I", target_addr)
+                parsed_rb, _ = self.bus.exchange(self.addr, CMD_REQ_BLOCK, payload, read_len=96)
+                if not parsed_rb or parsed_rb["cmd"] != RESP_ACK:
+                    return False
+                got = parsed_rb["payload"][4:4 + self.block_size]
+                if got != blk_data:
+                    return False
+
+        # End-of-file flush
+        parsed_eof, _ = self.bus.exchange(self.addr, CMD_RX_EOF, read_len=32)
+        if not parsed_eof or parsed_eof["cmd"] != RESP_ACK:
+            return False
+
         # Complete and trigger launch
         parsed_comp, _ = self.bus.exchange(self.addr, CMD_COMPLETE, read_len=32)
         if not parsed_comp or parsed_comp["cmd"] != RESP_ACK:
@@ -458,12 +522,31 @@ class ProductionBusFlasher:
 
 
 def make_valid_firmware_image(size: int = 1024) -> bytes:
-    """Generate a valid STM32H503 binary with valid SP and Thumb PC reset vector."""
+    """Generate a valid STM32H503 binary with valid SP, Thumb PC reset vector, HardFault vector, and entry opcodes."""
     valid_sp = 0x20004000  # Within 0x2000_0000..0x2000_8000
     valid_pc = 0x08002041  # Thumb mode (bit 0 == 1) within app slot
-    hdr = struct.pack("<II", valid_sp, valid_pc)
-    payload = bytes(((i * 7 + 13) & 0xFF) for i in range(size - 8))
-    return hdr + payload
+    valid_nmi = 0x08002051
+    valid_hardfault = 0x08002061  # Valid HardFault vector
+    vectors = [valid_sp, valid_pc, valid_nmi, valid_hardfault] + [0x08002071] * 12
+    vec_bytes = struct.pack("<16I", *vectors)
+    entry_opcode = struct.pack("<I", 0xB580B082)  # sub sp, #8; push {r7, lr}
+    rem_size = size - 64 - 4
+    payload = bytes(((i * 7 + 13) & 0xFF) for i in range(rem_size))
+    return vec_bytes + entry_opcode + payload
+
+
+def make_torn_entry_opcode_firmware_image(size: int = 1024) -> bytes:
+    """Generate an image with valid SP, PC, and vectors, but erased entry code (0xFFFFFFFF)."""
+    valid_sp = 0x20004000
+    valid_pc = 0x08002041
+    valid_nmi = 0x08002051
+    valid_hardfault = 0x08002061
+    vectors = [valid_sp, valid_pc, valid_nmi, valid_hardfault] + [0x08002071] * 12
+    vec_bytes = struct.pack("<16I", *vectors)
+    erased_opcode = b"\xFF\xFF\xFF\xFF"
+    rem_size = size - 64 - 4
+    payload = b"\xFF" * rem_size
+    return vec_bytes + erased_opcode + payload
 
 
 def generate_nvm_calibration_payload() -> bytes:
@@ -633,6 +716,74 @@ class TestProductionLockoutAndRecovery(unittest.TestCase):
                          "Target must resume normal running state after successful re-flash")
         self.assertTrue(self.node.application_check_valid(),
                          "Restored application must pass vector table validation")
+
+    def test_scenario_torn_entry_opcode_trapped(self):
+        """Scenario 3b: Valid SP/PC with Erased Entry Opcode Lockout Prevention.
+        Verify that an image with valid SP, PC, and exception vectors but erased entry code (0xFFFFFFFF)
+        fails application_check_valid() and is permanently trapped in bootloader recovery mode.
+        """
+        self.flasher.trigger_handsfree_reboot()
+        self.assertTrue(self.flasher.connect(), "Must connect to BareBoot")
+
+        # Flash image with valid SP/PC but unprogrammed entry opcode
+        torn_entry_fw = make_torn_entry_opcode_firmware_image(size=2048)
+        self.flasher.flash_image(torn_entry_fw, verify=True)
+
+        # Simulate reset after writing image
+        self.node.power_cycle(self.bus.current_time)
+
+        # application_check_valid must detect erased opcode and reject jump
+        self.assertFalse(self.node.application_check_valid(),
+                         "Erased entry opcode must fail application_check_valid")
+        self.assertEqual(self.node.state, SimulatedFishyServoNode.STATE_BOOT_TRAPPED,
+                         "Target must trap indefinitely in recovery mode when entry opcode is blank")
+        self.assertEqual(self.node.boot_window_expires, 0.0,
+                         "Application launch timer must remain disabled")
+
+        # Advance time by 60s; target must never branch to blank memory
+        self.bus.advance_time(60.0)
+        self.assertEqual(self.node.state, SimulatedFishyServoNode.STATE_BOOT_TRAPPED,
+                         "Target must remain trapped in recovery mode across time")
+
+        # Flashtool connects and re-flashes valid firmware to restore system
+        self.assertTrue(self.flasher.connect(), "Must connect to trapped recovery target")
+        valid_fw = make_valid_firmware_image(size=2048)
+        self.assertTrue(self.flasher.flash_image(valid_fw, verify=True))
+        self.assertEqual(self.node.state, SimulatedFishyServoNode.STATE_APP_RUNNING,
+                         "Target must resume normal running state after re-flash")
+        self.assertTrue(self.node.application_check_valid())
+
+    def test_scenario_inverted_block_ordering_aborted_after_block_1(self):
+        """Scenario 3c: Inverted Flashtool Block Ordering Abort Prevention.
+        Verify that aborting after Block 1 leaves Block 0 (vector table) unprogrammed (0xFFFFFFFF),
+        preventing any jump on subsequent reset.
+        """
+        self.flasher.trigger_handsfree_reboot()
+        self.assertTrue(self.flasher.connect(), "Must connect to BareBoot")
+
+        valid_fw = make_valid_firmware_image(size=4096)
+        # Abort transfer strictly after 1 payload block has been transmitted
+        aborted = self.flasher.flash_image(valid_fw, abort_after_blocks=1)
+        self.assertFalse(aborted, "Transfer must abort after 1 block")
+
+        # Block 0 (the vector table at APP_BASE) must remain completely unprogrammed (0xFF)
+        block_0_data = self.node.flash.read_range(APP_BASE, BLOCK_SIZE)
+        self.assertEqual(block_0_data, b"\xFF" * BLOCK_SIZE,
+                         "Block 0 (vector table) must remain 0xFFFFFFFF when transfer is aborted")
+
+        # Power cycle target
+        self.node.power_cycle(self.bus.current_time)
+        self.assertFalse(self.node.application_check_valid(),
+                         "Blank vector table must fail application_check_valid")
+        self.assertEqual(self.node.state, SimulatedFishyServoNode.STATE_BOOT_TRAPPED,
+                         "Target must be trapped in bootloader recovery mode")
+
+        # Re-flash valid image to restore normal operation
+        self.assertTrue(self.flasher.connect(), "Must connect to trapped recovery target")
+        self.assertTrue(self.flasher.flash_image(valid_fw, verify=True))
+        self.assertEqual(self.node.state, SimulatedFishyServoNode.STATE_APP_RUNNING,
+                         "Target must boot restored application")
+        self.assertTrue(self.node.application_check_valid())
 
     def test_scenario_4_nvm_calibration_retention(self):
         """Scenario 4: NVM Calibration Retention.
