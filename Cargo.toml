@@ -7,7 +7,6 @@ members = [
     "host/bareboot-client",
     "host/bareboot-cli",
     "host/bareboot-tui",
-    "host/bareboot-gui",
 ]
 exclude = [
     "targets/rp2350-usb",

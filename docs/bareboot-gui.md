@@ -1,6 +1,11 @@
 # BareBoot Graphical Workbench (bareboot-gui)
 
-The BareBoot Graphical Workbench (`bareboot-gui`) is a cross-platform desktop, mobile, and web application designed for configuring, compiling, and flashing microcontrollers running the BareBoot / Katapult bootloader protocol.
+> [!NOTE] Migration Notice
+> The standalone `bareboot-gui` crate has been deprecated and absorbed into the unified `bareConfig` workbench in `bareFOC` (`bareFOC/bareConfig`).
+> For all graphical bootloader flashing, motor setup, bus analysis, and target configuration, please use `bareConfig`.
+> The underlying headless engine (`crates/bareboot-engine`) and client library (`host/bareboot-client`) remain maintained in `bareBoot` to provide the core service layer powering `bareConfig`.
+
+The BareBoot Graphical Workbench (`bareboot-gui`) was a cross-platform desktop, mobile, and web application designed for configuring, compiling, and flashing microcontrollers running the BareBoot / Katapult bootloader protocol. Its capabilities are now available directly inside `bareConfig`.
 
 ---
 
@@ -128,32 +133,20 @@ The repository includes `.github/workflows/deploy-pages.yml` which automatically
 
 ## Building and Running
 
-### Desktop (Linux, macOS, Windows)
+### Unified Graphical Workbench (bareConfig)
+To run or build the graphical workbench, build `bareConfig` in the `bareFOC` repository:
 ```bash
-# Check compilation
-cargo check -p bareboot-gui
-
-# Run desktop workbench
-cargo run -p bareboot-gui
-
-# Run all workspace tests
-cargo test --workspace
+cd /home/sun/Filelink/Firmwares/bareFOC/bareConfig
+cargo run -p bareconfig
 ```
 
-### WebAssembly (Trunk)
+### Headless Engine and Tests (bareBoot)
 ```bash
-# Install trunk if not already installed
-cargo install trunk
+# Check compilation across bareBoot workspace
+cargo check --workspace
 
-# Add WebAssembly target
-rustup target add wasm32-unknown-unknown
-
-# Serve locally for development
-cd host/bareboot-gui
-trunk serve
-
-# Build release artifacts for hosting
-trunk build --release
+# Run all workspace tests (core, engine, client, protocol, tui, cli)
+cargo test --workspace
 ```
 
 ---

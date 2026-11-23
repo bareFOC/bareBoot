@@ -386,6 +386,8 @@ impl SoftResetMailbox {
     pub const BUS_TYPE_I2C: u8 = 0;
     pub const BUS_TYPE_I3C: u8 = 1;
     pub const BUS_TYPE_CAN: u8 = 2;
+    pub const BUS_TYPE_UART: u8 = 3;
+    pub const BUS_TYPE_USB: u8 = 4;
 
     pub fn new(magic: u64, dynamic_node_id: u8, bus_type: u8) -> Self {
         let mut mb = Self {

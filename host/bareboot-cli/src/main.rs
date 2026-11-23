@@ -13,7 +13,7 @@ enum Backend {
     I2c { device: String, address: u8 },
     #[cfg(target_os = "linux")]
     Can { interface: String, node_id: u32 },
-    Memory(InMemoryBus),
+    Memory,
 }
 
 struct Args {
@@ -92,7 +92,7 @@ fn parse_args() -> Result<Args, String> {
     let firmware = firmware.ok_or_else(|| format!("missing --firmware\n{}", usage()))?;
 
     let backend = if memory {
-        Backend::Memory(InMemoryBus::new())
+        Backend::Memory
     } else if let Some(device) = serial {
         #[cfg(target_os = "linux")]
         {
@@ -145,14 +145,14 @@ fn make_bus(args: &Args) -> Result<Box<dyn HostBus>, String> {
         Backend::Serial { device, baud } => Ok(Box::new(SerialBus::new(device, *baud).map_err(|e| e.to_string())?)),
         Backend::I2c { device, address } => Ok(Box::new(I2cBus::new(device, *address, args.timeout).map_err(|e| e.to_string())?)),
         Backend::Can { interface, node_id } => Ok(Box::new(SocketCanBus::new(interface, *node_id).map_err(|e| e.to_string())?)),
-        Backend::Memory(_) => Ok(Box::new(InMemoryBus::new())),
+        Backend::Memory => Ok(Box::new(InMemoryBus::new())),
     }
 }
 
 #[cfg(not(target_os = "linux"))]
 fn make_bus(args: &Args) -> Result<Box<dyn HostBus>, String> {
     match &args.backend {
-        Backend::Memory(_) => Ok(Box::new(InMemoryBus::new())),
+        Backend::Memory => Ok(Box::new(InMemoryBus::new())),
     }
 }
 
@@ -179,7 +179,7 @@ fn run(args: Args) -> Result<(), String> {
                 let _ = SocketCanBus::request_bootloader_uuid(interface, &uuid);
                 std::thread::sleep(Duration::from_millis(500));
             }
-            Backend::Memory(_) => {}
+            Backend::Memory => {}
         }
     }
 

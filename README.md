@@ -58,7 +58,8 @@ bareBoot/
 ├── Cargo.toml               # Virtual workspace manifest
 ├── crates/                  # Common platform-independent firmware libraries
 │   ├── bareboot-protocol    # Katapult-compatible wire framing, CRC, and commands
-│   └── bareboot-core        # Core bootloader runtime traits, dispatcher, paged flash writer
+│   ├── bareboot-core        # Core bootloader runtime traits, dispatcher, safe pins, paged flash writer
+│   └── bareboot-engine      # Headless execution worker, makeflash runner, dual TOML parser
 ├── targets/                 # Concrete MCU bootloader targets
 │   ├── rp2350-usb           # RP2350 USB CDC bootloader with BareBoot recovery
 │   ├── ch32v203-usb         # CH32V203 USB CDC bootloader
@@ -101,21 +102,14 @@ cargo run -p bareboot-tui
 
 Tabs: Bus, Config, Build, Flash (wizard), Profiles. Keys: `1-5` tabs, `n/p` wizard steps, `m/e/i/c` backend, `r` run, `w` save config, `l/s/d` profiles, `q` quit.
 
-### BareBoot Graphical Workbench (bareboot-gui)
+### Unified Graphical Workbench (bareConfig in bareFOC)
 
-A cross-platform desktop, mobile (Android USB OTG), and WebAssembly workbench built with `egui` and `craft-ui`:
+The standalone `bareboot-gui` application has been absorbed into the unified `bareConfig` workbench in `bareFOC` (`bareFOC/bareConfig`) to provide a single, frictionless tool for bootloader configuration, target flashing, motor setup, and tuning.
 
-- **Live Web Workbench (GitHub Pages)**: [https://barefoc.github.io/bareBoot/](https://barefoc.github.io/bareBoot/)
-- **Documentation**: [BareBoot Graphical Workbench Guide](docs/bareboot-gui.md)
-
-```sh
-# Run desktop workbench
-cargo run -p bareboot-gui
-
-# Run WebAssembly workbench locally
-cd host/bareboot-gui
-trunk serve
-```
+- **Graphical Workbench**: Use `bareConfig` in the `bareFOC` repository for all graphical workflows across desktop, mobile, and web.
+- **Headless Engine**: `crates/bareboot-engine` and `host/bareboot-client` serve as the public, headless service layer powering `bareConfig`.
+- **Terminal Tools**: `bareboot-tui` and `bareboot-cli` remain available in `bareBoot` for terminal-based operations.
+- **Migration Documentation**: See [BareBoot Graphical Workbench Guide](docs/bareboot-gui.md) for details.
 
 ### Target Firmware (Embedded)
 

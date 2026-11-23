@@ -143,7 +143,10 @@ pub fn should_park_in_bootloader(
 
 pub mod writer;
 pub use writer::{PagedWriter, WatchdogFeed, WatchdogFlash};
+pub mod safe_pins;
+pub use safe_pins::{apply_safe_pins, SafePin, PinLevel, PinDriver};
 pub mod dispatch;
+pub use dispatch::{MultiTransportArbiter, ArbitrationState, ArbitrationAction};
 pub mod commit;
 pub use commit::{CommitState, MonotonicCommitJournal, STATE_UPDATE_IN_PROGRESS, STATE_VALID};
 pub mod storage_adapter;

@@ -60,6 +60,10 @@ impl I2cBus {
         std::thread::sleep(Duration::from_millis(100));
         Ok(())
     }
+
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
 }
 
 #[cfg(target_os = "linux")]

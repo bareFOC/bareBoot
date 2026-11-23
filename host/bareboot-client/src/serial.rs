@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 #[cfg(target_os = "linux")]
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use crate::error::HostError;
@@ -97,7 +97,7 @@ impl HostBus for SerialBus {
         use std::io::{Read, Write};
 
         for &byte in frame {
-            let mut one = [byte];
+            let one = [byte];
             self.file
                 .write_all(&one)
                 .map_err(|e| HostError(format!("serial write failed: {e}")))?;
@@ -137,8 +137,7 @@ impl HostBus for SerialBus {
                         bareboot_protocol::FrameParse::NeedMore => {}
                     }
                 }
-                Err(e) => {
-
+                Err(_e) => {
                     if !rx_buf.is_empty() {
                         break;
                     }

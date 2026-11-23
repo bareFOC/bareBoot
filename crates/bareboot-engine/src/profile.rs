@@ -29,6 +29,8 @@ pub struct FlashProfile {
     pub timeout_secs: u64,
     #[serde(default = "default_verify")]
     pub verify: bool,
+    #[serde(default = "default_preserve_nvm")]
+    pub preserve_nvm: bool,
 
     // Katapult-style Bootloader Build Configuration
     #[serde(default = "default_mcu_family")]
@@ -64,6 +66,7 @@ fn default_node_id() -> String { "0x100".to_string() }
 fn default_tries() -> usize { 5 }
 fn default_timeout() -> u64 { 2 }
 fn default_verify() -> bool { true }
+fn default_preserve_nvm() -> bool { true }
 fn default_mcu_family() -> String { "STM32F103".to_string() }
 fn default_target_project() -> String { "bareboot".to_string() }
 fn default_can_enabled() -> bool { true }
@@ -94,6 +97,7 @@ impl FlashProfile {
                 tries: 5,
                 timeout_secs: 2,
                 verify: true,
+                preserve_nvm: true,
                 mcu_family: "STM32F103".to_string(),
                 target_project: "bareboot".to_string(),
                 can_enabled: true,
@@ -121,6 +125,7 @@ impl FlashProfile {
                 tries: 5,
                 timeout_secs: 2,
                 verify: true,
+                preserve_nvm: true,
                 mcu_family: "STM32F103".to_string(),
                 target_project: "bareboot".to_string(),
                 can_enabled: false,
@@ -148,6 +153,7 @@ impl FlashProfile {
                 tries: 5,
                 timeout_secs: 2,
                 verify: true,
+                preserve_nvm: true,
                 mcu_family: "STM32F103-USB".to_string(),
                 target_project: "bareboot".to_string(),
                 can_enabled: false,
@@ -175,6 +181,7 @@ impl FlashProfile {
                 tries: 5,
                 timeout_secs: 2,
                 verify: true,
+                preserve_nvm: true,
                 mcu_family: "STM32G0B1".to_string(),
                 target_project: "bareboot".to_string(),
                 can_enabled: true,
@@ -202,6 +209,7 @@ impl FlashProfile {
                 tries: 5,
                 timeout_secs: 2,
                 verify: true,
+                preserve_nvm: true,
                 mcu_family: "STM32H503".to_string(),
                 target_project: "bareboot".to_string(),
                 can_enabled: false,
@@ -229,6 +237,7 @@ impl FlashProfile {
                 tries: 5,
                 timeout_secs: 2,
                 verify: true,
+                preserve_nvm: true,
                 mcu_family: "CH32V203-USB".to_string(),
                 target_project: "bareboot-ch32v203-usb".to_string(),
                 can_enabled: false,
@@ -369,6 +378,7 @@ impl Default for FlashProfile {
             tries: default_tries(),
             timeout_secs: default_timeout(),
             verify: default_verify(),
+            preserve_nvm: default_preserve_nvm(),
             mcu_family: default_mcu_family(),
             target_project: default_target_project(),
             can_enabled: default_can_enabled(),
