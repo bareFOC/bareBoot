@@ -41,7 +41,7 @@ DECL_CONSTANT_STR("RESERVE_PINS_i2c_i3c", "PB6,PB7");
 DECL_CONSTANT("I2C_TARGET_ADDRESS", CONFIG_I2C_TARGET_ADDRESS);
 DECL_CONSTANT("I3C_STATIC_ADDRESS", CONFIG_I3C_STATIC_ADDRESS);
 DECL_CONSTANT("RECEIVE_WINDOW", RX_BUFFER_SIZE);
-#define I3C_AF (GPIO_FUNCTION(3) | GPIO_OPEN_DRAIN)
+#define I3C_AF (GPIO_FUNCTION(3))
 
 #define MODE_I2C 0
 #define MODE_I3C 1
@@ -321,13 +321,15 @@ I3C2_EV_IRQHandler(void)
     }
 
     // Transmit data to I3C master
-    if ((I3C2->EVR & I3C_EVR_TXFNFF) && (I3C2->IER & I3C_IER_TXFNFIE)) {
+    if (I3C2->IER & I3C_IER_TXFNFIE) {
         uint8_t tpos = readb(&transmit_pos);
         uint8_t tmax = readb(&transmit_max);
-        if (tpos < tmax) {
+        while ((I3C2->EVR & I3C_EVR_TXFNFF) && (tpos < tmax)) {
             I3C2->TDR = transmit_buf[tpos];
-            writeb(&transmit_pos, tpos + 1);
-        } else {
+            tpos++;
+            writeb(&transmit_pos, tpos);
+        }
+        if (tpos >= tmax) {
             I3C2->IER &= ~I3C_IER_TXFNFIE;
         }
     }
@@ -335,6 +337,9 @@ I3C2_EV_IRQHandler(void)
     // Frame Complete or Reception Target End
     if (evr & (I3C_EVR_FCF | I3C_EVR_RXTGTENDF)) {
         I3C2->CEVR = I3C_CEVR_CFCF | I3C_CEVR_CRXTGTENDF;
+        I3C2->IER &= ~I3C_IER_TXFNFIE;
+        writeb(&transmit_pos, 0);
+        writeb(&transmit_max, 0);
         sched_wake_tasks();
     }
 }
@@ -342,12 +347,15 @@ I3C2_EV_IRQHandler(void)
 void
 I3C2_ER_IRQHandler(void)
 {
+    // Clear all pending error and event flags
+    I3C2->CEVR = 0xFFFFFFFF;
+    I3C2->IER &= ~I3C_IER_TXFNFIE;
+    writeb(&transmit_pos, 0);
+    writeb(&transmit_max, 0);
     // Drain RX FIFO on overrun or error
     while (I3C2->EVR & I3C_EVR_RXFNEF) {
         (void)I3C2->RDR;
     }
-    // Clear all pending error and event flags
-    I3C2->CEVR = 0xFFFFFFFF;
 }
 
 // ---------------------------------------------------------
@@ -389,6 +397,8 @@ switch_to_i3c(void)
                      (24 << I3C_TIMINGR0_SCLL_OD_Pos) |
                      (3 << I3C_TIMINGR0_SCLH_I3C_Pos) |
                      (3 << I3C_TIMINGR0_SCLL_PP_Pos);
+    I3C2->TIMINGR2 = (3 << I3C_TIMINGR2_STALL_Pos) |
+                     I3C_TIMINGR2_STALLD | I3C_TIMINGR2_STALLT | I3C_TIMINGR2_STALLA;
     I3C2->CEVR = 0xFFFFFFFF;
     I3C2->IER = I3C_IER_RXFNEIE | I3C_IER_FCIE | I3C_IER_RXTGTENDIE |
                 I3C_IER_DAUPDIE | I3C_IER_ERRIE;
@@ -446,30 +456,12 @@ DECL_TASK(console_task);
 void
 console_sendf(const struct command_encoder *ce, va_list args)
 {
-    uint_fast8_t tpos = readb(&transmit_pos), tmax = readb(&transmit_max);
-    if (tpos >= tmax) {
-        tpos = tmax = 0;
-        writeb(&transmit_max, 0);
-        writeb(&transmit_pos, 0);
-    }
-    uint_fast8_t max_size = READP(ce->max_size);
-    if (tmax + max_size > sizeof(transmit_buf)) {
-        if (tmax + max_size - tpos > sizeof(transmit_buf))
-            return;
-        if (active_mode == MODE_I2C)
-            I2C_PERIPH->CR1 &= ~I2C_CR1_TXIE;
-        else
-            I3C2->IER &= ~I3C_IER_TXFNFIE;
-        tpos = readb(&transmit_pos);
-        tmax -= tpos;
-        memmove(&transmit_buf[0], &transmit_buf[tpos], tmax);
-        writeb(&transmit_pos, 0);
-        writeb(&transmit_max, tmax);
-    }
+    writeb(&transmit_pos, 0);
+    writeb(&transmit_max, 0);
 
-    uint8_t *buf = &transmit_buf[tmax];
+    uint8_t *buf = &transmit_buf[0];
     uint_fast8_t msglen = command_encode_and_frame(buf, ce, args);
-    writeb(&transmit_max, tmax + msglen);
+    writeb(&transmit_max, msglen);
 
     if (active_mode == MODE_I2C) {
         irqstatus_t flag = irq_save();
@@ -478,9 +470,17 @@ console_sendf(const struct command_encoder *ce, va_list args)
         }
         irq_restore(flag);
     } else {
-        I3C2->TGTTDR = msglen;
+        I3C2->TGTTDR = I3C_TGTTDR_PRELOAD | msglen;
         irqstatus_t flag = irq_save();
-        I3C2->IER |= I3C_IER_TXFNFIE;
+        uint8_t tpos = 0;
+        while ((I3C2->EVR & I3C_EVR_TXFNFF) && (tpos < msglen)) {
+            I3C2->TDR = transmit_buf[tpos];
+            tpos++;
+            writeb(&transmit_pos, tpos);
+        }
+        if (tpos < msglen) {
+            I3C2->IER |= I3C_IER_TXFNFIE;
+        }
         irq_restore(flag);
     }
 }
