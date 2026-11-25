@@ -1,0 +1,20 @@
+[package]
+name = "bareboot-stm32h503-i3c"
+version = "0.1.0"
+edition = "2024"
+description = "Pure Rust I3C-only BareBoot bootloader for STM32H503 (FishyServo)"
+
+[workspace]
+
+[dependencies]
+bareboot-core = { path = "../../crates/bareboot-core" }
+bareboot-protocol = { path = "../../crates/bareboot-protocol" }
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = { version = "0.7.5", features = ["device"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

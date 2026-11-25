@@ -64,6 +64,22 @@ class TestI3cUsbFlasher(unittest.TestCase):
         self.assertEqual(dev_info["dcr"], 0x63)
         mock_client.close()
 
+    def test_mock_transport_pin_inversion(self):
+        """Verify dynamic pin setting and swapping on MockAgentLaI3c."""
+        mock_client = MockAgentLaI3c()
+        self.assertEqual(mock_client.scl_pin, 10)
+        self.assertEqual(mock_client.sda_pin, 11)
+
+        mock_client.set_pins(14, 15)
+        self.assertEqual(mock_client.scl_pin, 14)
+        self.assertEqual(mock_client.sda_pin, 15)
+
+        scl, sda = mock_client.swap_pins()
+        self.assertEqual(scl, 15)
+        self.assertEqual(sda, 14)
+        self.assertEqual(mock_client.scl_pin, 15)
+        self.assertEqual(mock_client.sda_pin, 14)
+
     def test_full_flasher_workflow(self):
         """Verify full Katapult lifecycle: connect, block write, verify, complete."""
         mock_client = MockAgentLaI3c(freq_khz=12500)
@@ -86,6 +102,22 @@ class TestI3cUsbFlasher(unittest.TestCase):
         self.assertGreater(stats["effective_kb_s"], 0)
 
         mock_client.close()
+
+    def test_mock_transport_pin_inversion(self):
+        """Verify dynamic pin setting and swapping on MockAgentLaI3c."""
+        mock_client = MockAgentLaI3c()
+        self.assertEqual(mock_client.scl_pin, 10)
+        self.assertEqual(mock_client.sda_pin, 11)
+
+        mock_client.set_pins(14, 15)
+        self.assertEqual(mock_client.scl_pin, 14)
+        self.assertEqual(mock_client.sda_pin, 15)
+
+        scl, sda = mock_client.swap_pins()
+        self.assertEqual(scl, 15)
+        self.assertEqual(sda, 14)
+        self.assertEqual(mock_client.scl_pin, 15)
+        self.assertEqual(mock_client.sda_pin, 14)
 
     def test_verification_detects_corruption(self):
         """Verify that readback catches corrupted flash memory."""
@@ -115,6 +147,22 @@ class TestI3cUsbFlasher(unittest.TestCase):
         self.assertFalse(stats["verification_passed"])
 
         mock_client.close()
+
+    def test_mock_transport_pin_inversion(self):
+        """Verify dynamic pin setting and swapping on MockAgentLaI3c."""
+        mock_client = MockAgentLaI3c()
+        self.assertEqual(mock_client.scl_pin, 10)
+        self.assertEqual(mock_client.sda_pin, 11)
+
+        mock_client.set_pins(14, 15)
+        self.assertEqual(mock_client.scl_pin, 14)
+        self.assertEqual(mock_client.sda_pin, 15)
+
+        scl, sda = mock_client.swap_pins()
+        self.assertEqual(scl, 15)
+        self.assertEqual(sda, 14)
+        self.assertEqual(mock_client.scl_pin, 15)
+        self.assertEqual(mock_client.sda_pin, 14)
 
 
 if __name__ == "__main__":

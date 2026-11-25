@@ -6,14 +6,24 @@ Flashes BareBoot (artifacts/bareboot-stm32h503-i3c-i2c.bin) into STM32H503 Secto
 via native CMSIS-DAP over SWD (/dev/hidraw5) using an in-RAM execution stub.
 """
 
+import argparse
+import select
 import sys
 import time
 import struct
 import subprocess
 from pathlib import Path
 
-PROBE_PATH = "/dev/hidraw5"
-BAREBOOT_BIN = Path("/home/sun/Filelink/Firmwares/bareBoot/artifacts/bareboot-stm32h503-i3c-i2c.bin")
+DEFAULT_PROBE_PATH = "/dev/hidraw5"
+DEFAULT_BAREBOOT_BIN = "/home/sun/Filelink/Firmwares/bareBoot/artifacts/bareboot-stm32h503-i3c-i2c.bin"
+
+parser = argparse.ArgumentParser(description="Flash BareBoot into STM32H503 Sector 0 via AgentLA SWD.")
+parser.add_argument("--bin", dest="bin_path", default=DEFAULT_BAREBOOT_BIN, help="Path to BareBoot .bin image")
+parser.add_argument("--probe", dest="probe_path", default=DEFAULT_PROBE_PATH, help="CMSIS-DAP hidraw device path")
+args = parser.parse_args()
+
+PROBE_PATH = args.probe_path
+BAREBOOT_BIN = Path(args.bin_path)
 
 if not BAREBOOT_BIN.exists():
     print(f"Error: {BAREBOOT_BIN} not found")
@@ -33,13 +43,30 @@ c_code = '''
 #include <stdint.h>
 
 #define FLASH_NSKEYR  (*(volatile uint32_t*)0x40022004)
+#define FLASH_OPTKEYR (*(volatile uint32_t*)0x4002200C)
+#define FLASH_OPTCR   (*(volatile uint32_t*)0x4002201C)
 #define FLASH_NSSR    (*(volatile uint32_t*)0x40022020)
 #define FLASH_NSCR    (*(volatile uint32_t*)0x40022028)
 #define FLASH_NSCCR   (*(volatile uint32_t*)0x40022030)
+#define FLASH_WRP1CUR (*(volatile uint32_t*)0x400220E8)
+#define FLASH_WRP1PRG (*(volatile uint32_t*)0x400220EC)
 #define RCC_AHB1ENR   (*(volatile uint32_t*)0x44020C88)
 
 void erase_sector(uint32_t sector) {
     RCC_AHB1ENR |= (1 << 8) | (1 << 31);
+    while (FLASH_NSSR & 1);
+    FLASH_NSCCR = 0x00FE0000;
+    if (sector == 0 && ((FLASH_WRP1CUR & 1) == 0)) {
+        if (FLASH_OPTCR & 1) {
+            FLASH_OPTKEYR = 0x08192A3B;
+            FLASH_OPTKEYR = 0x4C5D6E7F;
+            while (FLASH_OPTCR & 1);
+        }
+        FLASH_WRP1PRG = FLASH_WRP1CUR | 1;
+        FLASH_OPTCR |= (1 << 1);
+        while (FLASH_OPTCR & (1 << 1));
+        FLASH_OPTCR |= 1;
+    }
     if (FLASH_NSCR & 1) {
         FLASH_NSKEYR = 0x45670123;
         FLASH_NSKEYR = 0xCDEF89AB;
@@ -100,12 +127,19 @@ print(f"[*] Stub binary: {len(stub_bin)} bytes")
 
 # Connect probe
 probe = open(PROBE_PATH, "r+b", buffering=0)
+# Drain any stale HID reports left by an interrupted session
+while select.select([probe], [], [], 0.01)[0]:
+    probe.read(64)
 
-def send_cmd(cmd_bytes):
+def send_cmd(cmd_bytes, retries=3):
     payload = bytes([0x00]) + cmd_bytes
     payload = payload + bytes(65 - len(payload))
-    probe.write(payload[:65])
-    return probe.read(64)
+    for _ in range(retries):
+        probe.write(payload[:65])
+        ready, _, _ = select.select([probe], [], [], 1.0)
+        if ready:
+            return probe.read(64)
+    raise TimeoutError(f"CMSIS-DAP HID read timeout for cmd 0x{cmd_bytes[0]:02X}")
 
 def transfer(transfers, max_retries=10):
     payload = bytearray([0x05, 0x00, len(transfers)])
@@ -193,9 +227,19 @@ print(f"[*] DP_CTRLSTAT: 0x{ctrlstat:08X}")
 transfer([(0x08, 0x01000000)]) # AP 1 (AHB-AP)
 transfer([(0x01, 0x23000012)]) # CSW Auto-inc single, secure, privileged
 
-# Halt core in Thread mode
+# Halt core immediately via VC_CORERESET + SYSRESETREQ so IWDG is cleared and cannot fire during SWD programming
 transfer([(0x05, 0xE000EDF0), (0x0D, 0xA05F0003)]) # DHCSR C_DEBUGEN | C_HALT
-time.sleep(0.01)
+write_mem(0xE000EDFC, 0x00000001) # DEMCR: VC_CORERESET
+write_mem(0xE000ED0C, 0x05FA0004) # AIRCR: SYSRESETREQ
+time.sleep(0.02)
+# Re-establish CSW after core reset and confirm halt
+transfer([(0x00, 0x0000001E)])
+transfer([(0x08, 0x01000000), (0x01, 0x23000012)])
+transfer([(0x05, 0xE000EDF0), (0x0D, 0xA05F0003)])
+write_mem(0xE000EDFC, 0x00000000) # Clear VC_CORERESET
+# Freeze IWDG during debug halt (DBGMCU_CR + DBGMCU_APB1LFZR)
+write_mem(0x44024004, read_mem(0x44024004) | 0x07)
+write_mem(0x44024008, read_mem(0x44024008) | (1 << 11) | (1 << 12))
 
 # Enable SRAM1 and FLITFEN
 write_mem(0x44020C88, 0x80000100)
@@ -283,11 +327,10 @@ for offset in range(0, len(bareboot_data), 32):
     reqs = [(0x05, 0x08000000 + offset)]
     for _ in range(8):
         reqs.append((0x0F, None))
-    reqs.append((0x0E, None))
     resp = transfer(reqs)
     if resp[2] != 1:
         raise RuntimeError(f"Transfer error at offset 0x{offset:X}: ack=0x{resp[2]:02X}")
-    read_bytes = resp[7:7+32]
+    read_bytes = resp[3:3+32]
     exp_chunk = bareboot_data[offset:offset+32]
     if read_bytes[:len(exp_chunk)] != exp_chunk:
         print(f"[!] Mismatch at offset 0x{offset:X}!")
@@ -304,7 +347,30 @@ if not verified:
 
 print(f"[*] VERIFICATION PASSED: All {len(bareboot_data)} bytes match perfectly!", flush=True)
 
-# 4. Release core and reset target
+# 4. Enforce factory Sector 0 WRP + BOR Level 3 before leaving SWD
+print("[*] Enforcing Sector 0 WRP and BOR Level 3 option bytes...", flush=True)
+wrp_cur = read_mem(0x400220E8)
+opt_cur = read_mem(0x40022050)
+if (wrp_cur & 0x01) != 0 or (opt_cur & 0x03) != 0x03:
+    optcr = read_mem(0x4002201C)
+    if optcr & 0x01:
+        write_mem(0x4002200C, 0x08192A3B)
+        write_mem(0x4002200C, 0x4C5D6E7F)
+    write_mem(0x400220EC, wrp_cur & ~0x01)   # FLASH_WRP1PRG bit 0 = 0 protects Sector 0
+    write_mem(0x40022054, (opt_cur & ~0x03) | 0x03)  # FLASH_OPTSR_PRG BOR Level 3
+    write_mem(0x4002201C, read_mem(0x4002201C) | (1 << 1))  # OPTSTRT
+    for _ in range(50):
+        time.sleep(0.01)
+        if (read_mem(0x4002201C) & (1 << 1)) == 0:
+            break
+    write_mem(0x4002201C, read_mem(0x4002201C) | 0x01)  # OPTLOCK
+wrp_check = read_mem(0x400220E8)
+opt_check = read_mem(0x40022050)
+assert (wrp_check & 0x01) == 0, f"Sector 0 WRP not active: WRPSGN1R_CUR=0x{wrp_check:08X}"
+assert (opt_check & 0x03) == 0x03, f"BOR Level 3 not active: OPTSR_CUR=0x{opt_check:08X}"
+print(f"[*] Hardware Sector 0 WRP (0x{wrp_check:08X}) and BOR=3 (0x{opt_check:08X}) verified active!", flush=True)
+
+# 5. Release core and reset target
 print("[*] Resetting target into BareBoot...")
 # Clear debug halt and release
 transfer([(0x05, 0xE000EDFC), (0x0D, 0x00000000)])

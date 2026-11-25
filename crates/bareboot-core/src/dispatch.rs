@@ -35,6 +35,7 @@ where
 
     match command {
         commands::CONNECT => {
+            writer.reset_session();
             let mut ack_payload = [0u8; MAX_FRAME];
             let cfg = writer.config();
             let len = build_connect_payload(
@@ -103,7 +104,9 @@ where
             }
         }
         commands::COMPLETE => {
-            writer.finish()?;
+            if writer.finish().is_err() || writer.commit_valid().is_err() {
+                return encode_command_error(output);
+            }
             writer.set_completed();
             let mut ack_payload = [0u8; 4];
             write_u32_le(&mut ack_payload, 0, commands::COMPLETE as u32);

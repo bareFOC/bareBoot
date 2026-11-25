@@ -247,9 +247,8 @@ pub fn build_connect_payload(
     Ok(payload_len)
 }
 
-/// Standard IEEE 802.3 CRC32 (polynomial 0xEDB88320)
-pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
+/// Incremental IEEE 802.3 CRC32 update (initialize `crc` with `0xFFFF_FFFF`, finalize with `!crc`).
+pub fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
     for &byte in data {
         crc ^= byte as u32;
         for _ in 0..8 {
@@ -260,7 +259,12 @@ pub fn crc32(data: &[u8]) -> u32 {
             };
         }
     }
-    !crc
+    crc
+}
+
+/// Standard IEEE 802.3 CRC32 (polynomial 0xEDB88320)
+pub fn crc32(data: &[u8]) -> u32 {
+    !crc32_update(0xFFFF_FFFF, data)
 }
 
 #[inline]

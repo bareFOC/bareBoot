@@ -25,6 +25,16 @@ pub trait FlashTarget {
     fn write_commit_record(&mut self, _record: &[u8]) -> Result<(), CoreError> {
         Err(CoreError::Flash)
     }
+
+    /// Hook invoked once before the first application page erase/program.
+    fn on_update_start(&mut self) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    /// Hook invoked on `CMD_COMPLETE` with exact programmed byte length and IEEE 802.3 CRC32.
+    fn on_update_complete(&mut self, _app_len: u32, _app_crc32: u32) -> Result<(), CoreError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +167,90 @@ pub fn should_park_in_bootloader(
 }
 
 
+pub use bareboot_protocol::{crc32, crc32_update};
+
+pub const BOOT_LOOP_MAGIC: u32 = 0x4242_4C50; // "BBLP"
+pub const BOOT_LOOP_MAX_ATTEMPTS: u32 = 3;
+
+/// 16-byte CRC32-protected boot-loop counter in `.uninit` SRAM.
+///
+/// BareBoot increments `attempts` before jumping to the application. The
+/// application clears `attempts = 0` once healthy execution is established.
+/// Reaching `BOOT_LOOP_MAX_ATTEMPTS` (3) traps BareBoot in recovery mode.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootLoopGuard {
+    pub magic: u32,
+    pub attempts: u32,
+    pub reserved: u32,
+    pub crc32: u32,
+}
+
+impl BootLoopGuard {
+    pub const SIZE: usize = 16;
+
+    pub fn new(attempts: u32) -> Self {
+        let mut guard = Self {
+            magic: BOOT_LOOP_MAGIC,
+            attempts,
+            reserved: 0,
+            crc32: 0,
+        };
+        guard.crc32 = guard.compute_crc32();
+        guard
+    }
+
+    pub fn compute_crc32(&self) -> u32 {
+        let m = self.magic.to_le_bytes();
+        let a = self.attempts.to_le_bytes();
+        let r = self.reserved.to_le_bytes();
+        let buf = [
+            m[0], m[1], m[2], m[3],
+            a[0], a[1], a[2], a[3],
+            r[0], r[1], r[2], r[3],
+        ];
+        crc32(&buf)
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.magic == BOOT_LOOP_MAGIC && self.crc32 == self.compute_crc32()
+    }
+
+    pub fn read(addr: usize) -> Option<Self> {
+        // SAFETY: Caller provides a valid 4-byte-aligned SRAM address.
+        let guard = unsafe { core::ptr::read_volatile(addr as *const Self) };
+        if guard.is_valid() {
+            Some(guard)
+        } else {
+            None
+        }
+    }
+
+    pub fn write(&self, addr: usize) {
+        // SAFETY: Caller provides a valid 4-byte-aligned SRAM address.
+        unsafe {
+            core::ptr::write_volatile(addr as *mut Self, *self);
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    pub fn is_trapped(addr: usize) -> bool {
+        Self::read(addr).map_or(false, |g| g.attempts >= BOOT_LOOP_MAX_ATTEMPTS)
+    }
+
+    pub fn record_boot_attempt(addr: usize) -> u32 {
+        let next = Self::read(addr)
+            .map_or(0, |g| g.attempts)
+            .saturating_add(1);
+        Self::new(next).write(addr);
+        next
+    }
+
+    pub fn clear(addr: usize) {
+        Self::new(0).write(addr);
+    }
+}
+
 pub mod writer;
 pub use writer::{PagedWriter, WatchdogFeed, WatchdogFlash};
 pub mod safe_pins;
@@ -164,7 +258,10 @@ pub use safe_pins::{apply_safe_pins, SafePin, PinLevel, PinDriver};
 pub mod dispatch;
 pub use dispatch::{MultiTransportArbiter, ArbitrationState, ArbitrationAction};
 pub mod commit;
-pub use commit::{CommitState, MonotonicCommitJournal, STATE_UPDATE_IN_PROGRESS, STATE_VALID};
+pub use commit::{
+    CommitRecord, CommitState, MonotonicCommitJournal, COMMIT_MAGIC, STATE_UPDATE_IN_PROGRESS,
+    STATE_VALID,
+};
 pub mod storage_adapter;
 pub use storage_adapter::NorFlashAdapter;
 
@@ -240,6 +337,36 @@ mod tests {
 
         // Valid vector with mailbox request: must park indefinitely
         assert!(should_park_in_bootloader(true, valid_sp, valid_pc, RAM_START, RAM_END, APP_BASE, FLASH_END, &valid_opcode));
+
+        // BootLoopGuard 3-strike trap and clear
+        let mut guard_slot = [0u32; 4];
+        let gaddr = guard_slot.as_mut_ptr() as usize;
+        assert!(!BootLoopGuard::is_trapped(gaddr));
+        assert_eq!(BootLoopGuard::record_boot_attempt(gaddr), 1);
+        assert!(!BootLoopGuard::is_trapped(gaddr));
+        assert_eq!(BootLoopGuard::record_boot_attempt(gaddr), 2);
+        assert!(!BootLoopGuard::is_trapped(gaddr));
+        assert_eq!(BootLoopGuard::record_boot_attempt(gaddr), 3);
+        assert!(BootLoopGuard::is_trapped(gaddr));
+        BootLoopGuard::clear(gaddr);
+        assert!(!BootLoopGuard::is_trapped(gaddr));
+        assert_eq!(BootLoopGuard::read(gaddr).unwrap().attempts, 0);
+
+        // Corrupted BootLoopGuard CRC resets attempts safely
+        unsafe {
+            let crc_ptr = (gaddr + 12) as *mut u32;
+            core::ptr::write_volatile(crc_ptr, core::ptr::read_volatile(crc_ptr) ^ 0xFF);
+        }
+        assert!(BootLoopGuard::read(gaddr).is_none());
+        assert!(!BootLoopGuard::is_trapped(gaddr));
+        assert_eq!(BootLoopGuard::record_boot_attempt(gaddr), 1);
+
+        // Incremental CRC32 parity with bareboot_protocol::crc32
+        let sample = b"123456789";
+        let state = crc32_update(0xFFFF_FFFF, &sample[..4]);
+        let state = crc32_update(state, &sample[4..]);
+        assert_eq!(!state, crc32(sample));
+        assert_eq!(!state, 0xCBF4_3926);
 
         // Invalid Thumb bit (even PC)
         let even_pc = 0x0800_2100;

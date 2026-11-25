@@ -43,35 +43,26 @@ RESP_ACK        = 0xA0
 RESP_NACK       = 0xA1
 
 
-def trigger_inband_reboot_and_switch(rest_base: str = DEFAULT_REST_URL, sda: int = 11, scl: int = 10) -> bool:
-    """Send in-band 0xF0 reboot strobe to 0x40 over I2C to reset running application
-    firmware into BareBoot, followed by a broadcast ping to 0x7E to trigger
-    BareBoot's hardware switch from I2C to MIPI I3C mode.
+def trigger_inband_reboot_and_switch(client: Optional[Any] = None) -> bool:
+    """Send in-band 0xF0 reboot strobe to 0x40 directly via AgentLA USB Bulk adapter,
+    followed by broadcast ping to 0x7E to trigger BareBoot hardware switch to MIPI I3C.
     """
-    import urllib.request
-    import json
-
-    def post(path, payload):
-        req = urllib.request.Request(
-            f"{rest_base}{path}",
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
+    if client is not None:
+        print("Sending in-band reboot strobe 0xF0 to 0x40 over USB Bulk (open-drain I2C)...")
         try:
-            with urllib.request.urlopen(req, timeout=2) as r:
-                return json.loads(r.read().decode())
+            client.i2c_write(0x40, bytes([0xF0]))
         except Exception as e:
-            return {"err": str(e)}
+            print(f"Notice: Reboot strobe write: {e}")
+        time.sleep(0.3)
 
-    print("Sending in-band reboot strobe 0xF0 to 0x40 over I2C...")
-    sr = post("/api/v1/bus/i2c/transfer", {"addr": 0x40, "sda": sda, "scl": scl, "data_hex": "F0", "read_len": 0})
-    time.sleep(0.3)
-
-    print("Pinging I3C broadcast address 0x7E to trigger hardware switch to I3C...")
-    post("/api/v1/bus/i2c/transfer", {"addr": 0x7E, "sda": sda, "scl": scl, "data_hex": "00", "read_len": 0})
-    time.sleep(0.05)
-    return True
+        print("Pinging I3C broadcast address 0x7E to trigger hardware switch to I3C...")
+        try:
+            client.i2c_write(0x7E, bytes([0x00]))
+        except Exception as e:
+            print(f"Notice: Ping 0x7E write: {e}")
+        time.sleep(0.05)
+        return True
+    return False
 
 
 
@@ -131,6 +122,18 @@ class MockAgentLaI3c:
         self.block_size = 64
         self.tx_bytes_count = 0
         self.rx_bytes_count = 0
+        self.scl_pin = 10
+        self.sda_pin = 11
+
+    def set_pins(self, scl: int, sda: int):
+        self.scl_pin = scl
+        self.sda_pin = sda
+
+    def swap_pins(self):
+        new_scl = self.sda_pin
+        new_sda = self.scl_pin
+        self.set_pins(new_scl, new_sda)
+        return self.scl_pin, self.sda_pin
 
     def connect(self) -> bool:
         self.connected = True
@@ -226,7 +229,15 @@ class I3cUsbFlasher:
         tx_data = make_frame(cmd, payload)
         t_start = time.perf_counter()
         self.client.private_write(self.addr, tx_data)
-        rx_data = self.client.private_read(self.addr, read_len)
+        rx_data = b""
+        for _ in range(50):
+            try:
+                rx_data = self.client.private_read(self.addr, read_len)
+                break
+            except Exception:
+                time.sleep(0.001)
+        else:
+            rx_data = self.client.private_read(self.addr, read_len)
         elapsed = time.perf_counter() - t_start
         parsed = parse_frame(rx_data)
         return parsed, elapsed
@@ -277,8 +288,9 @@ class I3cUsbFlasher:
         # 3. Readback Verification
         verification_passed = True
         if verify:
-            check_indices = [0, 1, num_blocks // 2, max(0, num_blocks - 2), num_blocks - 1]
-            check_indices = sorted(list(set(check_indices)))
+            check_indices = sorted(
+                {i for i in (0, 1, num_blocks // 2, num_blocks - 2, num_blocks - 1) if 0 <= i < num_blocks}
+            )
             for bi in check_indices:
                 target_addr = self.app_base + bi * self.block_size
                 payload = target_addr.to_bytes(4, "little")
@@ -315,7 +327,7 @@ class I3cUsbFlasher:
         }
 
 
-def run_benchmark(image_path: str, freq_khz: int, dry_run: bool) -> int:
+def run_benchmark(image_path: str, freq_khz: int, dry_run: bool, scl: Optional[int] = None, sda: Optional[int] = None, swap_pins: bool = False) -> int:
     """Execute flashing workflow and display comparative benchmark report."""
     if not os.path.exists(image_path):
         # Generate dummy 100 KB payload if file doesn't exist
@@ -346,6 +358,14 @@ def run_benchmark(image_path: str, freq_khz: int, dry_run: bool) -> int:
             print("ERROR: AgentLA USB Bulk device not found or unable to claim interface.")
             return 2
 
+        # Configure or invert bus pins if requested
+        if scl is not None and sda is not None:
+            print(f"Setting explicit bus pins: SCL=GP{scl}, SDA=GP{sda}")
+            client.set_pins(scl, sda)
+        elif swap_pins:
+            scl, sda = client.swap_pins()
+            print(f"Pins swapped by user flag: SCL=GP{scl}, SDA=GP{sda}")
+
         client.set_bus_speed(freq_khz)
         print("Checking target dynamic address via ENTDAA...")
         dev_info = None
@@ -356,7 +376,7 @@ def run_benchmark(image_path: str, freq_khz: int, dry_run: bool) -> int:
 
         if dev_info is None:
             print("Target not in I3C mode. Triggering in-band reboot into BareBoot and switching to I3C...")
-            trigger_inband_reboot_and_switch()
+            trigger_inband_reboot_and_switch(client=client)
             try:
                 client.rstdaa()
             except Exception:
@@ -366,13 +386,34 @@ def run_benchmark(image_path: str, freq_khz: int, dry_run: bool) -> int:
             except Exception as e:
                 print(f"ENTDAA retry after switch failed: {e}")
 
+            if dev_info is None and hasattr(client, "swap_pins"):
+                print("Notice: ENTDAA failed on current pins. Trying swapped pin orientation...")
+                client.swap_pins()
+                trigger_inband_reboot_and_switch(client=client)
+                try:
+                    client.rstdaa()
+                    dev_info = client.entdaa(DEFAULT_DYNAMIC_ADDR)
+                except Exception as e:
+                    print(f"ENTDAA on swapped pins failed: {e}")
+
         print(f"ENTDAA assigned address: {dev_info}")
 
     flasher = I3cUsbFlasher(client, addr=DEFAULT_DYNAMIC_ADDR, freq_khz=freq_khz)
     print("Connecting to BareBoot bootloader...")
-    if not flasher.connect_bootloader():
-        print("ERROR: Failed to connect to BareBoot bootloader.")
-        return 3
+    if not flasher.connect_bootloader(retries=3):
+        if not dry_run and hasattr(client, "swap_pins"):
+            print("Notice: Handshake unacknowledged on current pins. Attempting automatic pin inversion (swap SCL/SDA)...")
+            scl, sda = client.swap_pins()
+            print(f"Swapped pins to SCL=GP{scl}, SDA=GP{sda}. Retrying bootloader connect...")
+            if not flasher.connect_bootloader(retries=8):
+                # Revert if still failing
+                client.swap_pins()
+                print("ERROR: Failed to connect to BareBoot bootloader on both pin orientations.")
+                return 3
+            print(f"Auto-alignment succeeded: aligned to SCL=GP{scl}, SDA=GP{sda}.")
+        else:
+            print("ERROR: Failed to connect to BareBoot bootloader.")
+            return 3
 
     print(f"Connected: MCU={flasher.mcu}, AppBase=0x{flasher.app_base:08X}, BlockSize={flasher.block_size}")
     print("Flashing blocks and benchmarking throughput...")
@@ -410,6 +451,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image", nargs="?", default=DEFAULT_IMAGE, help="Firmware binary path")
     parser.add_argument("--freq", type=int, default=DEFAULT_FREQ_KHZ, help="I3C SCL clock in kHz (default: 12500)")
+    parser.add_argument("--scl", type=int, default=None, help="Explicit SCL GPIO pin on AgentLA")
+    parser.add_argument("--sda", type=int, default=None, help="Explicit SDA GPIO pin on AgentLA")
+    parser.add_argument("--swap-pins", "--invert-pins", action="store_true", help="Invert default SCL and SDA pin assignments")
     parser.add_argument("--dry-run", "--mock", action="store_true", help="Run with simulated USB Bulk I3C hardware")
     args = parser.parse_args()
 
@@ -425,7 +469,7 @@ def main():
         except Exception:
             dry_run = True
 
-    sys.exit(run_benchmark(args.image, args.freq, dry_run))
+    sys.exit(run_benchmark(args.image, args.freq, dry_run, scl=args.scl, sda=args.sda, swap_pins=args.swap_pins))
 
 
 if __name__ == "__main__":
