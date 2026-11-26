@@ -323,6 +323,8 @@ class I3cUsbFlasher:
 
         # 4. Complete & Jump to App
         parsed_comp, _ = self.exchange(CMD_COMPLETE, read_len=32)
+        if not parsed_comp or parsed_comp["cmd"] != RESP_ACK:
+            raise RuntimeError(f"CMD_COMPLETE failed: {parsed_comp}")
         t_all_done = time.perf_counter()
 
         total_elapsed = t_all_done - t_flash_start

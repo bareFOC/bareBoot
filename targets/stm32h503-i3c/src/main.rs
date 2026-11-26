@@ -614,10 +614,6 @@ fn main() -> ! {
     let mut led_on = true;
 
     loop {
-        if !boot_window_active && !iwdg_active {
-            iwdg_start();
-            iwdg_active = true;
-        }
         if iwdg_active {
             iwdg_feed();
         }
@@ -765,8 +761,10 @@ fn main() -> ! {
                         // without main-loop SysTick/SDA-check jitter so 1+ MHz SDR reads
                         // never underrun after the first 8 bytes.
                         let mut wait_spins: u32 = 0;
-                        while tx_pos < tx_len && wait_spins < 500_000 {
-                            iwdg_feed();
+                        while tx_pos < tx_len && wait_spins < 2_000_000 {
+                            if iwdg_active {
+                                iwdg_feed();
+                            }
                             let ev = read_volatile(I3C2_EVR);
                             if ev & EVR_TXFNFF != 0 {
                                 write_volatile(I3C2_TDR, tx_buf[tx_pos] as u32);
