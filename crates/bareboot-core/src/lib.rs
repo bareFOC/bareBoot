@@ -264,6 +264,16 @@ pub use commit::{
 };
 pub mod storage_adapter;
 pub use storage_adapter::NorFlashAdapter;
+pub mod hal;
+pub use hal::{
+    ArchBoot, BootPlatform, BusTransport, FlashRegion, NorFlashRegion, PollEvent, ResetReason,
+    TickTimer,
+};
+pub mod runner;
+pub use runner::{
+    validate_app_vector_from_flash, validate_app_vector_with_arch, verify_app_crc32, BootRunner,
+    NoopWatchdog, RunnerAction,
+};
 
 #[cfg(test)]
 mod tests {

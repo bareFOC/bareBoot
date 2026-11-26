@@ -12,6 +12,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bareboot-arch-cortexm"
+version = "0.1.0"
+dependencies = [
+ "bareboot-core",
+ "cortex-m",
+]
+
+[[package]]
 name = "bareboot-core"
 version = "0.1.0"
 dependencies = [
@@ -27,6 +35,7 @@ version = "0.1.0"
 name = "bareboot-stm32h503-i3c"
 version = "0.1.0"
 dependencies = [
+ "bareboot-arch-cortexm",
  "bareboot-core",
  "bareboot-protocol",
  "cortex-m",

@@ -8,6 +8,7 @@ description = "Pure Rust I3C-only BareBoot bootloader for STM32H503 (FishyServo)
 
 [dependencies]
 bareboot-core = { path = "../../crates/bareboot-core" }
+bareboot-arch-cortexm = { path = "../../crates/bareboot-arch-cortexm" }
 bareboot-protocol = { path = "../../crates/bareboot-protocol" }
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
 cortex-m-rt = { version = "0.7.5", features = ["device"] }

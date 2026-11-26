@@ -1,0 +1,10 @@
+[package]
+name = "bareboot-arch-cortexm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ARM Cortex-M ArchBoot implementation for bareboot-core"
+
+[dependencies]
+bareboot-core = { workspace = true }
+cortex-m = "0.7.7"

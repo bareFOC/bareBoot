@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/bareboot-protocol",
     "crates/bareboot-core",
+    "crates/bareboot-arch-cortexm",
     "crates/bareboot-engine",
     "host/bareboot-client",
     "host/bareboot-cli",
@@ -28,6 +29,7 @@ version = "0.1.0"
 [workspace.dependencies]
 bareboot-protocol = { path = "crates/bareboot-protocol" }
 bareboot-core = { path = "crates/bareboot-core" }
+bareboot-arch-cortexm = { path = "crates/bareboot-arch-cortexm" }
 bareboot-engine = { path = "crates/bareboot-engine" }
 
 [profile.release]

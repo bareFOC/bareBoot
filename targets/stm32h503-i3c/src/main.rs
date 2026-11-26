@@ -1,14 +1,13 @@
 #![no_std]
 #![no_main]
 
-use bareboot_core::dispatch::dispatch_one;
-use bareboot_core::writer::{PagedWriter, WatchdogFlash};
+use bareboot_arch_cortexm::CortexMArch;
 use bareboot_core::{
-    apply_safe_pins, check_and_clear_bootloader_request, crc32_update, validate_app_vector,
-    BootConfig, BootLoopGuard, CommitState, CoreError, FlashTarget, MonotonicCommitJournal,
-    PinMode,
+    apply_safe_pins, check_and_clear_bootloader_request, ArchBoot, BootConfig, BootPlatform,
+    BootRunner, BusTransport, CoreError, FlashRegion, PinMode, PollEvent, ResetReason, TickTimer,
+    WatchdogFeed,
 };
-use bareboot_protocol::{ccc, responses, SoftResetMailbox, REQUEST_BOOTLOADER};
+use bareboot_protocol::{ccc, SoftResetMailbox, REQUEST_BOOTLOADER};
 use core::ptr::{read_volatile, write_volatile};
 use cortex_m_rt::entry;
 
@@ -35,7 +34,6 @@ const SYSCLK_HZ: u32 = 32_000_000; // STM32H503 reset HSIDIV=/2 (32 MHz)
 const SYST_CSR: *mut u32 = 0xE000_E010 as *mut u32;
 const SYST_RVR: *mut u32 = 0xE000_E014 as *mut u32;
 const SYST_CVR: *mut u32 = 0xE000_E018 as *mut u32;
-const SCB_AIRCR: *mut u32 = 0xE000_ED0C as *mut u32;
 
 // RCC (Non-Secure)
 const RCC_BASE: u32 = 0x4402_0C00;
@@ -125,13 +123,7 @@ pub static __INTERRUPTS: [u32; 135] = [0; 135];
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    cortex_m::interrupt::disable();
-    unsafe {
-        write_volatile(0xE000_ED0C as *mut u32, (0x05FA << 16) | (1 << 2));
-    }
-    loop {
-        cortex_m::asm::nop();
-    }
+    CortexMArch::system_reset()
 }
 
 fn iwdg_start() {
@@ -149,6 +141,17 @@ fn iwdg_start() {
 fn iwdg_feed() {
     unsafe {
         write_volatile(IWDG_KR, 0xAAAA);
+    }
+}
+
+struct IwdgWatchdog(bool);
+
+impl WatchdogFeed for IwdgWatchdog {
+    #[inline(always)]
+    fn feed(&mut self) {
+        if self.0 {
+            iwdg_feed();
+        }
     }
 }
 
@@ -258,134 +261,350 @@ fn ensure_sector0_wrp_and_bor() {
     }
 }
 
-/// Flash target strictly scoped to Sector 13 CommitStore (`0x0801_A000..0x0801_C000`).
-struct CommitSectorFlash;
-
-impl FlashTarget for CommitSectorFlash {
-    fn page_size(&self) -> usize {
-        COMMIT_SIZE
-    }
-
-    fn app_base(&self) -> u32 {
-        COMMIT_BASE
-    }
-
-    fn erase_page(&mut self, addr: u32) -> Result<(), CoreError> {
-        if addr != COMMIT_BASE {
-            return Err(CoreError::InvalidAddress);
-        }
-        unsafe { flash_erase_sector(addr) }
-    }
-
-    fn write_page_bytes(&mut self, addr: u32, data: &[u8]) -> Result<(), CoreError> {
-        if addr < COMMIT_BASE || addr.saturating_add(data.len() as u32) > COMMIT_BASE + COMMIT_SIZE as u32 {
-            return Err(CoreError::InvalidAddress);
-        }
-        unsafe { flash_write_quads(addr, data) }
-    }
-
-    fn read_bytes(&mut self, addr: u32, out: &mut [u8]) -> Result<(), CoreError> {
-        if addr < COMMIT_BASE || addr.saturating_add(out.len() as u32) > COMMIT_BASE + COMMIT_SIZE as u32 {
-            return Err(CoreError::InvalidAddress);
-        }
-        unsafe { flash_read_volatile(addr, out) };
-        Ok(())
-    }
-
-    fn read_uid(&mut self, _out: &mut [u8; 12]) {}
-
-    unsafe fn boot_jump(_app_entry: u32) -> ! {
-        loop {}
-    }
+struct Stm32H5FlashRegion {
+    base: u32,
+    end: u32,
 }
 
-/// Application flash target strictly scoped to Sectors 1..12 (`0x0800_2000..0x0801_A000`).
-struct Stm32H5Flash {
-    journal: MonotonicCommitJournal<COMMIT_SIZE, 16>,
-}
-
-impl Stm32H5Flash {
-    fn new(journal: MonotonicCommitJournal<COMMIT_SIZE, 16>) -> Self {
-        Self { journal }
-    }
-}
-
-impl FlashTarget for Stm32H5Flash {
+impl FlashRegion for Stm32H5FlashRegion {
     fn page_size(&self) -> usize {
         PAGE_SIZE
     }
 
-    fn app_base(&self) -> u32 {
-        APP_BASE
+    fn region_base(&self) -> u32 {
+        self.base
+    }
+
+    fn region_end(&self) -> u32 {
+        self.end
     }
 
     fn erase_page(&mut self, addr: u32) -> Result<(), CoreError> {
-        if addr < APP_BASE || addr >= APP_END || (addr & (PAGE_SIZE as u32 - 1)) != 0 {
+        if addr < self.base || addr >= self.end || (addr & (PAGE_SIZE as u32 - 1)) != 0 {
             return Err(CoreError::InvalidAddress);
         }
         unsafe { flash_erase_sector(addr) }
     }
 
-    fn write_page_bytes(&mut self, addr: u32, data: &[u8]) -> Result<(), CoreError> {
-        if addr < APP_BASE || addr.saturating_add(data.len() as u32) > APP_END {
+    fn write_bytes(&mut self, addr: u32, data: &[u8]) -> Result<(), CoreError> {
+        if addr < self.base || addr.saturating_add(data.len() as u32) > self.end {
             return Err(CoreError::InvalidAddress);
         }
         unsafe { flash_write_quads(addr, data) }
     }
 
     fn read_bytes(&mut self, addr: u32, out: &mut [u8]) -> Result<(), CoreError> {
-        if addr < APP_BASE || addr.saturating_add(out.len() as u32) > APP_END {
+        if addr < self.base || addr.saturating_add(out.len() as u32) > self.end {
             return Err(CoreError::InvalidAddress);
         }
         unsafe { flash_read_volatile(addr, out) };
         Ok(())
     }
+}
 
-    fn read_uid(&mut self, out: &mut [u8; 12]) {
+struct SysTickTimer;
+
+impl SysTickTimer {
+    fn init() -> Self {
         unsafe {
-            let src = UID_BASE as *const u32;
-            for i in 0..3 {
-                let w = read_volatile(src.add(i)).to_le_bytes();
-                out[i * 4..i * 4 + 4].copy_from_slice(&w);
+            write_volatile(SYST_RVR, (SYSCLK_HZ / 1000) - 1);
+            write_volatile(SYST_CVR, 0);
+            write_volatile(SYST_CSR, 0x05); // Enable, processor clock
+        }
+        Self
+    }
+}
+
+impl TickTimer for SysTickTimer {
+    fn poll_1ms(&mut self) -> bool {
+        unsafe { (read_volatile(SYST_CSR) & (1 << 16)) != 0 }
+    }
+
+    fn on_heartbeat(&mut self, led_on: bool) {
+        unsafe {
+            write_volatile(GPIOA_BSRR, if led_on { 1 << 16 } else { 1 });
+        }
+    }
+}
+
+struct I3c2Transport {
+    node_addr: u8,
+    uid_mix: u32,
+    iwdg_active: bool,
+    rx_buf: [u8; 256],
+    rx_len: usize,
+    tx_idle: bool,
+    sda_low_ms: u32,
+    i3c_idle_ms: u32,
+}
+
+impl I3c2Transport {
+    fn new(node_addr: u8, uid_mix: u32, iwdg_active: bool) -> Self {
+        init_i3c2(node_addr, uid_mix);
+        Self {
+            node_addr,
+            uid_mix,
+            iwdg_active,
+            rx_buf: [0u8; 256],
+            rx_len: 0,
+            tx_idle: true,
+            sda_low_ms: 0,
+            i3c_idle_ms: 0,
+        }
+    }
+}
+
+impl BusTransport for I3c2Transport {
+    fn has_activity(&mut self) -> bool {
+        let evr_tick = unsafe { read_volatile(I3C2_EVR) };
+        if (evr_tick & (EVR_FCF | EVR_RXFNEF | EVR_DAUPDF | EVR_RSTF)) != 0 {
+            self.i3c_idle_ms = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn on_tick_1ms(&mut self) {
+        unsafe {
+            self.i3c_idle_ms = self.i3c_idle_ms.saturating_add(1);
+            let sda_low = (read_volatile(GPIOB_IDR) & PB4_SDA_MASK) == 0;
+            let bus_progress = (read_volatile(I3C2_EVR)
+                & (EVR_FCF | EVR_RXFNEF | EVR_DAUPDF | EVR_RSTF | EVR_ERRF))
+                != 0;
+            if !sda_low || bus_progress {
+                self.sda_low_ms = 0;
+            } else {
+                self.sda_low_ms = self.sda_low_ms.saturating_add(1);
+            }
+
+            // Recover I3C2 either on stuck SDA (>=50 ms) or prolonged idle without DAA (>=2 s).
+            let stuck_sda = self.sda_low_ms >= 50;
+            let idle_unassigned = self.i3c_idle_ms >= I3C2_IDLE_RESET_MS
+                && (read_volatile(I3C2_DEVR0) & 1) == 0;
+            if stuck_sda || idle_unassigned {
+                let prev_devr0 = read_volatile(I3C2_DEVR0);
+                reset_i3c2_bus();
+                init_i3c2(self.node_addr, self.uid_mix);
+                if stuck_sda && (prev_devr0 & 1) != 0 {
+                    write_volatile(I3C2_DEVR0, prev_devr0);
+                }
+                self.rx_len = 0;
+                self.tx_idle = true;
+                self.sda_low_ms = 0;
+                self.i3c_idle_ms = 0;
             }
         }
     }
 
-    unsafe fn boot_jump(app_entry: u32) -> ! {
-        if !app_vector_is_valid() {
-            unsafe {
-                write_volatile(SCB_AIRCR, 0x05FA_0004);
-            }
-            loop {
-                core::hint::spin_loop();
-            }
-        }
+    fn poll_rx(&mut self, buf: &mut [u8]) -> PollEvent {
         unsafe {
-            // Disable SysTick
-            write_volatile(SYST_CSR, 0);
-            write_volatile(SYST_CVR, 0);
-            // Reset I3C2 via RCC_APB3RSTR and return PB3/PB4 to analog/input
+            let evr = read_volatile(I3C2_EVR);
+            let mut event = PollEvent::None;
+
+            if evr & EVR_RSTF != 0 {
+                write_volatile(I3C2_CEVR, EVR_RSTF);
+                write_volatile(I3C2_DEVR0, read_volatile(I3C2_DEVR0) & !1);
+                write_volatile(I3C2_TGTTDR, 0);
+                write_volatile(I3C2_CFGR, read_volatile(I3C2_CFGR) | CFGR_RXFLUSH | CFGR_TXFLUSH);
+                self.rx_len = 0;
+                self.tx_idle = true;
+                return PollEvent::BusReset;
+            }
+
+            if evr & EVR_DAUPDF != 0 {
+                write_volatile(I3C2_CEVR, EVR_DAUPDF);
+                let rmr = read_volatile(I3C2_RMR);
+                let rcode = ((rmr >> 8) & 0xFF) as u8;
+                if rcode == ccc::DIRECT_RSTDAA {
+                    write_volatile(I3C2_DEVR0, read_volatile(I3C2_DEVR0) & !1);
+                } else {
+                    event = PollEvent::BusActivity;
+                }
+            }
+
+            if evr & EVR_ERRF != 0 {
+                let _ = read_volatile(I3C2_SER);
+                write_volatile(I3C2_CEVR, EVR_ERRF);
+                write_volatile(I3C2_CFGR, read_volatile(I3C2_CFGR) | CFGR_RXFLUSH);
+                self.rx_len = 0;
+            }
+
+            while read_volatile(I3C2_EVR) & EVR_RXFNEF != 0 {
+                let b = (read_volatile(I3C2_RDR) & 0xFF) as u8;
+                if self.rx_len < self.rx_buf.len() {
+                    self.rx_buf[self.rx_len] = b;
+                    self.rx_len += 1;
+                }
+            }
+
+            let evr_end = read_volatile(I3C2_EVR);
+            if evr_end & (EVR_FCF | EVR_RXTGTENDF) != 0 {
+                while read_volatile(I3C2_EVR) & EVR_RXFNEF != 0 {
+                    let b = (read_volatile(I3C2_RDR) & 0xFF) as u8;
+                    if self.rx_len < self.rx_buf.len() {
+                        self.rx_buf[self.rx_len] = b;
+                        self.rx_len += 1;
+                    }
+                }
+                write_volatile(I3C2_CEVR, EVR_FCF | EVR_RXTGTENDF);
+
+                let rcode = ((read_volatile(I3C2_RMR) >> 8) & 0xFF) as u8;
+                if rcode == ccc::DIRECT_SETDASA && self.rx_len >= 1 {
+                    let da = (self.rx_buf[0] >> 1) & 0x7F;
+                    if (0x08..=0x77).contains(&da) {
+                        write_volatile(I3C2_DEVR0, ((da as u32) << 1) | 1);
+                        event = PollEvent::BusActivity;
+                    }
+                    self.rx_len = 0;
+                } else if self.rx_len > 0 {
+                    let copy_len = self.rx_len.min(buf.len());
+                    buf[..copy_len].copy_from_slice(&self.rx_buf[..copy_len]);
+                    self.rx_len = 0;
+                    return PollEvent::Frame(copy_len);
+                }
+            }
+
+            event
+        }
+    }
+
+    fn send_tx(&mut self, frame: &[u8]) -> Result<(), CoreError> {
+        unsafe {
+            self.tx_idle = false;
+            write_volatile(I3C2_TGTTDR, 0);
+            write_volatile(I3C2_CFGR, read_volatile(I3C2_CFGR) | CFGR_TXFLUSH);
+            for _ in 0..64 {
+                if read_volatile(I3C2_EVR) & EVR_TXFEF != 0 {
+                    break;
+                }
+            }
+            write_volatile(I3C2_TGTTDR, (1 << 16) | (frame.len() as u32));
+            let mut tx_pos = 0usize;
+            let mut wait_spins: u32 = 0;
+            while tx_pos < frame.len() && wait_spins < 2_000_000 {
+                if self.iwdg_active {
+                    iwdg_feed();
+                }
+                let ev = read_volatile(I3C2_EVR);
+                if ev & EVR_TXFNFF != 0 {
+                    write_volatile(I3C2_TDR, frame[tx_pos] as u32);
+                    tx_pos += 1;
+                    wait_spins = 0;
+                    continue;
+                }
+                if ev & (EVR_RXFNEF | EVR_ERRF | EVR_RSTF | EVR_DAUPDF) != 0 {
+                    break;
+                }
+                wait_spins += 1;
+            }
+            self.tx_idle = tx_pos >= frame.len();
+            Ok(())
+        }
+    }
+
+    fn tx_idle(&self) -> bool {
+        self.tx_idle
+    }
+
+    fn wait_tx_drain(&mut self) {
+        // Brief delay to allow final private_read to finish clocking out
+        for _ in 0..200_000 {
+            cortex_m::asm::nop();
+        }
+    }
+
+    fn prepare_for_jump(&mut self) {
+        unsafe {
             reset_i3c2_bus();
             write_volatile(GPIOB_MODER, read_volatile(GPIOB_MODER) | 0x03C0);
-            // Feed IWDG if active before handing off
-            iwdg_feed();
-            let sp = read_volatile(app_entry as *const u32);
-            let reset_handler = read_volatile((app_entry + 4) as *const u32);
-            let vtor = 0xE000_ED08 as *mut u32;
-            write_volatile(vtor, app_entry);
-            cortex_m::asm::dsb();
-            cortex_m::asm::isb();
-            cortex_m::asm::bootstrap(sp as *const u32, reset_handler as *const u32);
+        }
+    }
+}
+
+struct Stm32H5Platform {
+    uid: [u8; 12],
+    reset_reason: ResetReason,
+    mailbox_req: bool,
+    transport: I3c2Transport,
+    iwdg_active: bool,
+    timer: SysTickTimer,
+}
+
+impl BootPlatform for Stm32H5Platform {
+    type Flash = Stm32H5FlashRegion;
+    type CommitFlash = Stm32H5FlashRegion;
+    type Transport = I3c2Transport;
+    type Watchdog = IwdgWatchdog;
+    type Timer = SysTickTimer;
+    type Arch = CortexMArch;
+
+    fn boot_config(&self) -> BootConfig {
+        BootConfig {
+            protocol_version: 1,
+            app_base: APP_BASE,
+            app_end: APP_END,
+            block_size: BLOCK_SIZE,
+            mcu_type: b"stm32h503kb",
+            software_version: b"bareboot-i3c-0.2",
+            uid: self.uid,
         }
     }
 
-    fn on_update_start(&mut self) -> Result<(), CoreError> {
-        self.journal.mark_in_progress(&mut CommitSectorFlash)
+    fn ram_bounds(&self) -> (u32, u32) {
+        (RAM_START, RAM_END)
     }
 
-    fn on_update_complete(&mut self, app_len: u32, app_crc32: u32) -> Result<(), CoreError> {
-        self.journal
-            .mark_valid(&mut CommitSectorFlash, app_len, app_crc32)
+    fn boot_window_ms(&self) -> u32 {
+        BOOT_WINDOW_MS
+    }
+
+    fn idle_timeout_ms(&self) -> Option<u32> {
+        Some(BOOTLOADER_IDLE_TIMEOUT_MS)
+    }
+
+    fn mailbox_addr(&self) -> Option<u32> {
+        Some(MAILBOX_ADDR)
+    }
+
+    fn legacy_cookie_addr(&self) -> Option<u32> {
+        Some(LEGACY_COOKIE_ADDR as u32)
+    }
+
+    fn boot_loop_guard_addr(&self) -> Option<usize> {
+        Some(BOOT_LOOP_GUARD_ADDR)
+    }
+
+    fn reset_reason(&self) -> ResetReason {
+        self.reset_reason
+    }
+
+    fn read_mailbox_request(&mut self) -> bool {
+        self.mailbox_req
+    }
+
+    fn into_parts(
+        self,
+    ) -> (
+        Self::Flash,
+        Self::CommitFlash,
+        Self::Transport,
+        Self::Watchdog,
+        Self::Timer,
+    ) {
+        (
+            Stm32H5FlashRegion {
+                base: APP_BASE,
+                end: APP_END,
+            },
+            Stm32H5FlashRegion {
+                base: COMMIT_BASE,
+                end: COMMIT_BASE + COMMIT_SIZE as u32,
+            },
+            self.transport,
+            IwdgWatchdog(self.iwdg_active),
+            self.timer,
+        )
     }
 }
 
@@ -407,40 +626,6 @@ fn read_mailbox_request(fallback_addr: u8) -> (bool, u8) {
     }
     let legacy = check_and_clear_bootloader_request(LEGACY_COOKIE_ADDR);
     (legacy || stack_cookie, fallback_addr)
-}
-
-fn app_vector_is_valid() -> bool {
-    unsafe {
-        let sp = read_volatile(APP_BASE as *const u32);
-        let pc = read_volatile((APP_BASE + 4) as *const u32);
-        let entry_addr = pc & !1;
-        if entry_addr < APP_BASE || entry_addr.saturating_add(4) > APP_END {
-            return false;
-        }
-        let op = [
-            read_volatile(entry_addr as *const u8),
-            read_volatile((entry_addr + 1) as *const u8),
-            read_volatile((entry_addr + 2) as *const u8),
-            read_volatile((entry_addr + 3) as *const u8),
-        ];
-        validate_app_vector(sp, pc, RAM_START, RAM_END, APP_BASE, APP_END, &op)
-    }
-}
-
-fn verify_app_crc32(app_len: u32, expected_crc: u32) -> bool {
-    if app_len == 0 || app_len > (APP_END - APP_BASE) {
-        return false;
-    }
-    let mut crc = 0xFFFF_FFFFu32;
-    let mut offset = 0u32;
-    while offset < app_len {
-        iwdg_feed();
-        let chunk = (app_len - offset).min(PAGE_SIZE as u32) as usize;
-        let slice = unsafe { core::slice::from_raw_parts((APP_BASE + offset) as *const u8, chunk) };
-        crc = crc32_update(crc, slice);
-        offset += chunk as u32;
-    }
-    (!crc) == expected_crc
 }
 
 unsafe fn reset_i3c2_bus() {
@@ -544,7 +729,13 @@ fn main() -> ! {
     let rsr = unsafe { read_volatile(RCC_RSR) };
     unsafe { write_volatile(RCC_RSR, rsr | RSR_RMVF) };
     let iwdg_rst = (rsr & RSR_IWDGRSTF) != 0;
-    let fault_rst = (rsr & (RSR_IWDGRSTF | RSR_WWDGRSTF | RSR_SFTRSTF)) != 0;
+    let reset_reason = if (rsr & (RSR_IWDGRSTF | RSR_WWDGRSTF)) != 0 {
+        ResetReason::Watchdog
+    } else if (rsr & RSR_SFTRSTF) != 0 {
+        ResetReason::Software
+    } else {
+        ResetReason::PowerOn
+    };
 
     let uid_words = unsafe {
         [
@@ -553,243 +744,30 @@ fn main() -> ! {
             read_volatile((UID_BASE + 8) as *const u32),
         ]
     };
+    let mut uid = [0u8; 12];
+    for i in 0..3 {
+        uid[i * 4..i * 4 + 4].copy_from_slice(&uid_words[i].to_le_bytes());
+    }
     let uid_mix = uid_words[0] ^ uid_words[1] ^ uid_words[2];
     let fallback_addr = bareboot_protocol::fallback_address(&uid_words);
 
     let (mailbox_req, node_addr) = read_mailbox_request(fallback_addr);
-    let boot_loop_trapped = BootLoopGuard::is_trapped(BOOT_LOOP_GUARD_ADDR);
-    if mailbox_req || !fault_rst {
-        BootLoopGuard::clear(BOOT_LOOP_GUARD_ADDR);
-    }
 
     init_clocks_and_pins();
-    init_i3c2(node_addr, uid_mix);
-    let mut iwdg_active = iwdg_rst;
-    if iwdg_active {
+    if iwdg_rst {
         iwdg_start();
     }
     ensure_sector0_wrp_and_bor();
 
-    let mut journal = MonotonicCommitJournal::<COMMIT_SIZE, 16>::new(COMMIT_BASE);
-    let commit_valid = matches!(journal.init(&mut CommitSectorFlash), Ok(CommitState::Valid));
-    let app_integrity_ok = commit_valid
-        && app_vector_is_valid()
-        && verify_app_crc32(journal.app_len(), journal.app_crc32());
-
-    let mut flash = Stm32H5Flash::new(journal);
-    let mut uid = [0u8; 12];
-    flash.read_uid(&mut uid);
-
-    let config = BootConfig {
-        protocol_version: 1,
-        app_base: APP_BASE,
-        app_end: APP_END,
-        block_size: BLOCK_SIZE,
-        mcu_type: b"stm32h503kb",
-        software_version: b"bareboot-i3c-0.2",
+    let platform = Stm32H5Platform {
         uid,
+        reset_reason,
+        mailbox_req,
+        transport: I3c2Transport::new(node_addr, uid_mix, iwdg_rst),
+        iwdg_active: iwdg_rst,
+        timer: SysTickTimer::init(),
     };
 
-    let wd_flash = WatchdogFlash::new(flash, iwdg_feed as fn());
-    let mut writer: PagedWriter<WatchdogFlash<Stm32H5Flash, fn()>, PAGE_SIZE> =
-        PagedWriter::new(wd_flash, config);
-
-    let mut rx_buf = [0u8; 256];
-    let mut rx_len: usize = 0;
-    let mut tx_buf = [0u8; 256];
-    let mut tx_len: usize = 0;
-    let mut tx_pos: usize = 0;
-
-    let mut boot_window_active = !mailbox_req && !boot_loop_trapped && app_integrity_ok;
-    // SysTick 1ms tick at 32 MHz
-    unsafe {
-        write_volatile(SYST_RVR, (SYSCLK_HZ / 1000) - 1);
-        write_volatile(SYST_CVR, 0);
-        write_volatile(SYST_CSR, 0x05); // Enable, processor clock
-    }
-    let mut ms_elapsed: u32 = 0;
-    let mut sda_low_ms: u32 = 0;
-    let mut idle_ms: u32 = 0;
-    let mut i3c_idle_ms: u32 = 0;
-    let mut led_on = true;
-
-    loop {
-        if iwdg_active {
-            iwdg_feed();
-        }
-
-        unsafe {
-            let evr_tick = read_volatile(I3C2_EVR);
-            if (evr_tick & (EVR_FCF | EVR_RXFNEF | EVR_DAUPDF | EVR_RSTF)) != 0 {
-                idle_ms = 0;
-                i3c_idle_ms = 0;
-            }
-            if read_volatile(SYST_CSR) & (1 << 16) != 0 {
-                ms_elapsed = ms_elapsed.wrapping_add(1);
-                idle_ms = idle_ms.saturating_add(1);
-                i3c_idle_ms = i3c_idle_ms.saturating_add(1);
-                if ms_elapsed % 250 == 0 {
-                    led_on = !led_on;
-                    write_volatile(GPIOA_BSRR, if led_on { 1 << 16 } else { 1 });
-                }
-                let sda_low = (read_volatile(GPIOB_IDR) & PB4_SDA_MASK) == 0;
-                let bus_progress = (read_volatile(I3C2_EVR)
-                    & (EVR_FCF | EVR_RXFNEF | EVR_DAUPDF | EVR_RSTF | EVR_ERRF))
-                    != 0;
-                if !sda_low || bus_progress {
-                    sda_low_ms = 0;
-                } else {
-                    sda_low_ms = sda_low_ms.saturating_add(1);
-                }
-
-                // Recover I3C2 either on stuck SDA (>=50 ms) or prolonged idle without DAA (>=2 s).
-                let stuck_sda = sda_low_ms >= 50;
-                let idle_unassigned = i3c_idle_ms >= I3C2_IDLE_RESET_MS
-                    && (read_volatile(I3C2_DEVR0) & 1) == 0;
-                if stuck_sda || idle_unassigned {
-                    let prev_devr0 = read_volatile(I3C2_DEVR0);
-                    reset_i3c2_bus();
-                    init_i3c2(node_addr, uid_mix);
-                    if stuck_sda && (prev_devr0 & 1) != 0 {
-                        write_volatile(I3C2_DEVR0, prev_devr0);
-                    }
-                    rx_len = 0;
-                    tx_len = 0;
-                    tx_pos = 0;
-                    sda_low_ms = 0;
-                    i3c_idle_ms = 0;
-                }
-
-                // If parked in bootloader with zero valid I3C activity for 30s and a valid
-                // non-looping app exists, reset cleanly to boot into the application.
-                if app_integrity_ok && !boot_loop_trapped && idle_ms >= BOOTLOADER_IDLE_TIMEOUT_MS
-                {
-                    write_volatile(SCB_AIRCR, 0x05FA_0004);
-                    loop {
-                        core::hint::spin_loop();
-                    }
-                }
-
-                if boot_window_active && ms_elapsed >= BOOT_WINDOW_MS {
-                    if fault_rst {
-                        BootLoopGuard::record_boot_attempt(BOOT_LOOP_GUARD_ADDR);
-                    }
-                    Stm32H5Flash::boot_jump(APP_BASE);
-                }
-            }
-
-            let evr = read_volatile(I3C2_EVR);
-
-            if evr & EVR_RSTF != 0 {
-                write_volatile(I3C2_CEVR, EVR_RSTF);
-                write_volatile(I3C2_DEVR0, read_volatile(I3C2_DEVR0) & !1);
-                write_volatile(I3C2_TGTTDR, 0);
-                write_volatile(I3C2_CFGR, read_volatile(I3C2_CFGR) | CFGR_RXFLUSH | CFGR_TXFLUSH);
-                rx_len = 0;
-                tx_len = 0;
-                tx_pos = 0;
-                boot_window_active = false;
-                BootLoopGuard::clear(BOOT_LOOP_GUARD_ADDR);
-            }
-
-            if evr & EVR_DAUPDF != 0 {
-                write_volatile(I3C2_CEVR, EVR_DAUPDF);
-                let rmr = read_volatile(I3C2_RMR);
-                let rcode = ((rmr >> 8) & 0xFF) as u8;
-                if rcode == ccc::DIRECT_RSTDAA {
-                    write_volatile(I3C2_DEVR0, read_volatile(I3C2_DEVR0) & !1);
-                } else {
-                    boot_window_active = false;
-                }
-            }
-
-            if evr & EVR_ERRF != 0 {
-                let _ = read_volatile(I3C2_SER);
-                write_volatile(I3C2_CEVR, EVR_ERRF);
-                write_volatile(I3C2_CFGR, read_volatile(I3C2_CFGR) | CFGR_RXFLUSH);
-                rx_len = 0;
-            }
-
-            while read_volatile(I3C2_EVR) & EVR_RXFNEF != 0 {
-                let b = (read_volatile(I3C2_RDR) & 0xFF) as u8;
-                if rx_len < rx_buf.len() {
-                    rx_buf[rx_len] = b;
-                    rx_len += 1;
-                }
-            }
-
-            let evr_end = read_volatile(I3C2_EVR);
-            if evr_end & (EVR_FCF | EVR_RXTGTENDF) != 0 {
-                while read_volatile(I3C2_EVR) & EVR_RXFNEF != 0 {
-                    let b = (read_volatile(I3C2_RDR) & 0xFF) as u8;
-                    if rx_len < rx_buf.len() {
-                        rx_buf[rx_len] = b;
-                        rx_len += 1;
-                    }
-                }
-                write_volatile(I3C2_CEVR, EVR_FCF | EVR_RXTGTENDF);
-
-                let rcode = ((read_volatile(I3C2_RMR) >> 8) & 0xFF) as u8;
-                if rcode == ccc::DIRECT_SETDASA && rx_len >= 1 {
-                    let da = (rx_buf[0] >> 1) & 0x7F;
-                    if (0x08..=0x77).contains(&da) {
-                        write_volatile(I3C2_DEVR0, ((da as u32) << 1) | 1);
-                        boot_window_active = false;
-                    }
-                    rx_len = 0;
-                } else if rx_len > 0 {
-                    let resp_len = match dispatch_one(&mut writer, &rx_buf[..rx_len], &mut tx_buf) {
-                        Ok(len) => len,
-                        Err(_) => {
-                            bareboot_protocol::encode_frame(responses::NACK, &[], &mut tx_buf)
-                                .unwrap_or(0)
-                        }
-                    };
-                    if resp_len > 0 {
-                        boot_window_active = false;
-                        tx_len = resp_len;
-                        tx_pos = 0;
-                        write_volatile(I3C2_TGTTDR, 0);
-                        write_volatile(I3C2_CFGR, read_volatile(I3C2_CFGR) | CFGR_TXFLUSH);
-                        for _ in 0..64 {
-                            if read_volatile(I3C2_EVR) & EVR_TXFEF != 0 {
-                                break;
-                            }
-                        }
-                        write_volatile(I3C2_TGTTDR, (1 << 16) | (resp_len as u32));
-                        // Tightly drain the entire TX response into the 8-byte FIFO
-                        // without main-loop SysTick/SDA-check jitter so 1+ MHz SDR reads
-                        // never underrun after the first 8 bytes.
-                        let mut wait_spins: u32 = 0;
-                        while tx_pos < tx_len && wait_spins < 2_000_000 {
-                            if iwdg_active {
-                                iwdg_feed();
-                            }
-                            let ev = read_volatile(I3C2_EVR);
-                            if ev & EVR_TXFNFF != 0 {
-                                write_volatile(I3C2_TDR, tx_buf[tx_pos] as u32);
-                                tx_pos += 1;
-                                wait_spins = 0;
-                                continue;
-                            }
-                            if ev & (EVR_RXFNEF | EVR_ERRF | EVR_RSTF | EVR_DAUPDF) != 0 {
-                                break;
-                            }
-                            wait_spins += 1;
-                        }
-                    }
-                    rx_len = 0;
-                }
-
-                if writer.is_completed() && tx_pos >= tx_len {
-                    // Brief delay to allow final private_read to finish clocking out
-                    for _ in 0..200_000 {
-                        cortex_m::asm::nop();
-                    }
-                    BootLoopGuard::clear(BOOT_LOOP_GUARD_ADDR);
-                    Stm32H5Flash::boot_jump(APP_BASE);
-                }
-            }
-        }
-    }
+    let mut runner = BootRunner::<Stm32H5Platform, PAGE_SIZE, COMMIT_SIZE, 16>::new(platform);
+    runner.run()
 }
