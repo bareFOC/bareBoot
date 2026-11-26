@@ -14,8 +14,8 @@ use cortex_m_rt::entry;
 
 include!(concat!(env!("OUT_DIR"), "/safe_pins_generated.rs"));
 
-const APP_BASE: u32 = 0x0800_2000;
-const APP_END: u32 = 0x0801_A000; // Sectors 1..12 (96 KiB)
+const APP_BASE: u32 = 0x0800_4000;
+const APP_END: u32 = 0x0801_A000; // Sectors 2..12 (88 KiB)
 const COMMIT_BASE: u32 = 0x0801_A000; // Sector 13 (8 KiB)
 const COMMIT_SIZE: usize = 8192;
 const PAGE_SIZE: usize = 8192;
@@ -238,7 +238,7 @@ fn ensure_sector0_wrp_and_bor() {
     unsafe {
         let wrp_cur = read_volatile(FLASH_WRPSGN1R_CUR);
         let opt_cur = read_volatile(FLASH_OPTSR_CUR);
-        if (wrp_cur & 0x01) == 0 && (opt_cur & 0x03) == 0x03 {
+        if (wrp_cur & 0x03) == 0 && (opt_cur & 0x03) == 0x03 {
             return;
         }
         while read_volatile(FLASH_NSSR) & 1 != 0 {}
@@ -248,7 +248,7 @@ fn ensure_sector0_wrp_and_bor() {
             write_volatile(FLASH_OPTKEYR, 0x4C5D_6E7F);
             while read_volatile(FLASH_OPTCR) & 1 != 0 {}
         }
-        write_volatile(FLASH_WRPSGN1R_PRG, wrp_cur & !0x01); // Bit 0 = 0 protects Sector 0
+        write_volatile(FLASH_WRPSGN1R_PRG, wrp_cur & !0x03); // Bits [1:0] = 00 protects Sectors 0..1 (16 KiB)
         write_volatile(FLASH_OPTSR_PRG, (opt_cur & !0x03) | 0x03); // BOR Level 3 (~2.7 V)
         write_volatile(FLASH_OPTCR, read_volatile(FLASH_OPTCR) | (1 << 1)); // OPTSTRT
         while read_volatile(FLASH_OPTCR) & (1 << 1) != 0 {

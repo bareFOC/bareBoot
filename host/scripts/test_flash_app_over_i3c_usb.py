@@ -88,7 +88,7 @@ class TestI3cUsbFlasher(unittest.TestCase):
 
         flasher = I3cUsbFlasher(mock_client, addr=0x40, freq_khz=12500)
         self.assertTrue(flasher.connect_bootloader())
-        self.assertEqual(flasher.app_base, 0x08002000)
+        self.assertEqual(flasher.app_base, 0x08004000)
         self.assertEqual(flasher.block_size, 64)
         self.assertEqual(flasher.mcu, "stm32h503xx")
 

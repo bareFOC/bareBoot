@@ -128,7 +128,7 @@ class MockAgentLaI3c:
         self.dynamic_address = 0x40
         self.connected = False
         self.flash_memory = bytearray(128 * 1024)
-        self.app_base = 0x08002000
+        self.app_base = 0x08004000
         self.block_size = 64
         self.tx_bytes_count = 0
         self.rx_bytes_count = 0
@@ -230,7 +230,7 @@ class I3cUsbFlasher:
         self.client = client
         self.addr = addr
         self.freq_khz = freq_khz
-        self.app_base = 0x08002000
+        self.app_base = 0x08004000
         self.block_size = 64
         self.mcu = "unknown"
 
