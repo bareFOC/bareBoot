@@ -4,26 +4,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum PinLevel {
-    Low,
-    High,
-}
-
-fn default_pin_level() -> PinLevel {
-    PinLevel::Low
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SafePinConfig {
-    pub pin: String,
-    #[serde(default = "default_pin_level")]
-    pub level: PinLevel,
-    #[serde(default)]
-    pub comment: Option<String>,
-}
-
 fn default_boot_window() -> u32 {
     250
 }
@@ -44,8 +24,9 @@ pub struct RuntimeDefaults {
     pub uart_baud: Option<u32>,
     #[serde(default = "default_preserve_nvm")]
     pub preserve_nvm: bool,
+    /// Klipper-style safe startup pin specs (e.g. `"!PA9"`, `"PB1"`, `"^PB12"`).
     #[serde(default)]
-    pub initial_safe_pins: Vec<SafePinConfig>,
+    pub initial_safe_pins: Vec<String>,
 }
 
 impl Default for RuntimeDefaults {
@@ -137,47 +118,115 @@ fn parse_u8_val(val: &toml::Value) -> Option<u8> {
     parse_u32_val(val).map(|v| v as u8)
 }
 
-fn parse_safe_pins_val(val: &toml::Value) -> Vec<SafePinConfig> {
+fn parse_safe_pins_val(val: &toml::Value) -> Vec<String> {
     let mut out = Vec::new();
     if let toml::Value::Array(arr) = val {
         for item in arr {
-            if let Ok(cfg) = item.clone().try_into::<SafePinConfig>() {
-                out.push(cfg);
-            } else if let toml::Value::String(s) = item {
-                let parts: Vec<&str> = s.split(':').collect();
-                let pin = parts[0].trim().to_string();
-                let level = if parts.len() > 1 && parts[1].trim().eq_ignore_ascii_case("high") {
-                    PinLevel::High
-                } else {
-                    PinLevel::Low
-                };
-                out.push(SafePinConfig {
-                    pin,
-                    level,
-                    comment: None,
-                });
+            if let toml::Value::String(s) = item {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    out.push(trimmed.to_string());
+                }
             }
         }
     }
     out
 }
 
+fn strip_klipper_modifiers(spec: &str) -> (bool, bool, bool, &str) {
+    let mut rest = spec.trim();
+    let mut inverted = false;
+    let mut pull_up = false;
+    let mut pull_down = false;
+    while let Some(b) = rest.as_bytes().first().copied() {
+        match b {
+            b'!' => inverted = true,
+            b'^' => pull_up = true,
+            b'~' => pull_down = true,
+            _ => break,
+        }
+        rest = &rest[1..];
+    }
+    (inverted, pull_up, pull_down, rest.trim())
+}
+
+fn push_unique_pin(out: &mut Vec<String>, seen: &mut Vec<String>, spec: String, base_pin: &str) {
+    let key = base_pin.to_ascii_uppercase();
+    if !key.is_empty() && !seen.contains(&key) {
+        seen.push(key);
+        out.push(spec);
+    }
+}
+
+/// Auto-derive Klipper-style safe startup pins from `[gate_driver]`.
+///
+/// Active-high output pins (no `!`, e.g. `sleep_pin = "PA9"`) are inverted to `!PA9`
+/// (`OutputLow`). Active-low output pins (`!` prefix, e.g. `enable_pin = "!PB1"`)
+/// become `PB1` (`OutputHigh`). Input pins (`fault_pin`) preserve `^` / `~` pulls.
+fn derive_safe_pins_from_gate_driver(gd: &toml::map::Map<String, toml::Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+
+    for key in [
+        "sleep_pin",
+        "enable_pin",
+        "en_pin",
+        "inl_a",
+        "inl_b",
+        "inl_c",
+        "inh_a",
+        "inh_b",
+        "inh_c",
+    ] {
+        if let Some(raw) = gd.get(key).and_then(|v| v.as_str()) {
+            let (inverted, _pu, _pd, base) = strip_klipper_modifiers(raw);
+            if base.is_empty() {
+                continue;
+            }
+            let safe_spec = if inverted {
+                base.to_string()
+            } else {
+                format!("!{base}")
+            };
+            push_unique_pin(&mut out, &mut seen, safe_spec, base);
+        }
+    }
+
+    if let Some(raw) = gd.get("fault_pin").and_then(|v| v.as_str()) {
+        let (_inv, pull_up, pull_down, base) = strip_klipper_modifiers(raw);
+        if !base.is_empty() {
+            if pull_up {
+                push_unique_pin(&mut out, &mut seen, format!("^{base}"), base);
+            } else if pull_down {
+                push_unique_pin(&mut out, &mut seen, format!("~{base}"), base);
+            }
+        }
+    }
+
+    out
+}
+
 /// Dual parser: parses either a standalone bareboot.toml or a barefoc.toml
-/// containing [bootloader], [mcu], and [memory] sections.
+/// containing [bootloader], [mcu]/[board], [memory], and optional [gate_driver] sections.
 pub fn parse_target_config(text: &str) -> Result<TargetConfig, String> {
     let val: toml::Value = toml::from_str(text).map_err(|e| e.to_string())?;
     let root = val.as_table().ok_or_else(|| "expected TOML table".to_string())?;
 
     if let Some(bl_val) = root.get("bootloader").and_then(|v| v.as_table()) {
-        // barefoc.toml format with [bootloader], [mcu], [memory]
+        // barefoc.toml format with [bootloader], [mcu]/[board], [memory], [gate_driver]
         let mcu_table = root.get("mcu").and_then(|v| v.as_table());
+        let board_table = root.get("board").and_then(|v| v.as_table());
         let mem_table = root.get("memory").and_then(|v| v.as_table());
+        let gd_table = root.get("gate_driver").and_then(|v| v.as_table());
 
         let target = bl_val
             .get("target")
             .and_then(|v| v.as_str())
             .or_else(|| mcu_table.and_then(|m| m.get("target").and_then(|v| v.as_str())))
             .or_else(|| mcu_table.and_then(|m| m.get("family").and_then(|v| v.as_str())))
+            .or_else(|| board_table.and_then(|b| b.get("mcu").and_then(|v| v.as_str())))
+            .or_else(|| board_table.and_then(|b| b.get("target").and_then(|v| v.as_str())))
+            .or_else(|| board_table.and_then(|b| b.get("family").and_then(|v| v.as_str())))
             .unwrap_or("generic")
             .to_string();
 
@@ -204,19 +253,36 @@ pub fn parse_target_config(text: &str) -> Result<TargetConfig, String> {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-        let initial_safe_pins = bl_val
-            .get("initial_safe_pins")
-            .map(parse_safe_pins_val)
-            .unwrap_or_default();
+        let initial_safe_pins = if let Some(explicit) = bl_val.get("initial_safe_pins") {
+            parse_safe_pins_val(explicit)
+        } else if let Some(gd) = gd_table {
+            derive_safe_pins_from_gate_driver(gd)
+        } else {
+            Vec::new()
+        };
 
         let memory = if let Some(mem) = mem_table {
+            let app_base = mem
+                .get("app_base")
+                .or_else(|| mem.get("app_origin"))
+                .and_then(parse_u32_val);
+            let app_end = mem.get("app_end").and_then(parse_u32_val).or_else(|| {
+                let size = mem.get("app_size").and_then(parse_u32_val)?;
+                Some(app_base?.saturating_add(size))
+            });
             TargetMemoryConfig {
-                flash_start: mem.get("flash_start").and_then(parse_u32_val),
+                flash_start: mem
+                    .get("flash_start")
+                    .or_else(|| mem.get("flash_origin"))
+                    .and_then(parse_u32_val),
                 flash_size: mem.get("flash_size").and_then(parse_u32_val),
                 bootloader_size: mem.get("bootloader_size").and_then(parse_u32_val),
-                app_base: mem.get("app_base").and_then(parse_u32_val),
-                app_end: mem.get("app_end").and_then(parse_u32_val),
-                nvm_base: mem.get("nvm_base").and_then(parse_u32_val),
+                app_base,
+                app_end,
+                nvm_base: mem
+                    .get("nvm_base")
+                    .or_else(|| mem.get("nvm_origin"))
+                    .and_then(parse_u32_val),
                 page_size: mem.get("page_size").and_then(parse_u32_val),
             }
         } else {
@@ -474,12 +540,7 @@ node_id = "0x30"
 i2c_address = "0x30"
 uart_baud = 250000
 preserve_nvm = true
-initial_safe_pins = [
-    { pin = "PB15", level = "low", comment = "DRV_SLEEP low" },
-    { pin = "PB1", level = "low", comment = "INL_A low" },
-    { pin = "PB0", level = "low", comment = "INL_B low" },
-    { pin = "PA7", level = "low", comment = "INL_C low" },
-]
+initial_safe_pins = ["!PB15", "!PB1", "!PB0", "!PA7"]
 "#;
 
         let cfg = parse_target_config(toml_str).unwrap();
@@ -490,13 +551,61 @@ initial_safe_pins = [
         assert_eq!(cfg.runtime_defaults.i2c_address, Some(0x30));
         assert_eq!(cfg.runtime_defaults.uart_baud, Some(250000));
         assert!(cfg.runtime_defaults.preserve_nvm);
-        assert_eq!(cfg.runtime_defaults.initial_safe_pins.len(), 4);
-        assert_eq!(cfg.runtime_defaults.initial_safe_pins[0].pin, "PB15");
-        assert_eq!(cfg.runtime_defaults.initial_safe_pins[0].level, PinLevel::Low);
+        assert_eq!(
+            cfg.runtime_defaults.initial_safe_pins,
+            vec!["!PB15", "!PB1", "!PB0", "!PA7"]
+        );
 
         assert_eq!(cfg.memory.app_base, Some(0x08002000));
         assert_eq!(cfg.memory.app_end, Some(0x0801E000));
         assert_eq!(cfg.memory.page_size, Some(2048));
+    }
+
+    #[test]
+    fn auto_derive_safe_pins_from_barefoc_gate_driver() {
+        let toml_str = r#"
+[board]
+name = "fishyservo-stm32h5"
+mcu = "stm32h503kbu6"
+family = "stm32h5"
+
+[memory]
+flash_origin = 0x08000000
+flash_size = 131072
+bootloader_size = 8192
+app_origin = 0x08002000
+app_size = 106496
+nvm_origin = 0x0801C000
+
+[bootloader]
+transport = "i2c"
+boot_window_ms = 250
+i2c_address = 0x40
+
+[gate_driver]
+driver_type = "drv8411a"
+sleep_pin = "PA9"
+enable_pin = "!PB1"
+inl_a = "PB5"
+inl_b = "PB15"
+inl_c = "PA7"
+inh_a = "PA15"
+inh_b = "PA8"
+inh_c = "PA6"
+fault_pin = "^!PB12"
+"#;
+        let cfg = parse_target_config(toml_str).unwrap();
+        assert_eq!(cfg.target, "stm32h503kbu6");
+        assert_eq!(cfg.memory.flash_start, Some(0x0800_0000));
+        assert_eq!(cfg.memory.app_base, Some(0x0800_2000));
+        assert_eq!(cfg.memory.app_end, Some(0x0800_2000 + 106_496));
+        assert_eq!(cfg.memory.nvm_base, Some(0x0801_C000));
+        assert_eq!(
+            cfg.runtime_defaults.initial_safe_pins,
+            vec![
+                "!PA9", "PB1", "!PB5", "!PB15", "!PA7", "!PA15", "!PA8", "!PA6", "^PB12"
+            ]
+        );
     }
 
     #[test]
@@ -510,8 +619,9 @@ preserve_nvm = true
 app_base = 0x08002000
 app_end = 0x08010000
 initial_safe_pins = [
-    "PB15:low",
-    "PA7:high",
+    "!PB15",
+    "PA7",
+    "^PB12",
 ]
 "#;
         let cfg = parse_target_config(toml_str).unwrap();
@@ -520,11 +630,10 @@ initial_safe_pins = [
         assert_eq!(cfg.runtime_defaults.boot_window_ms, 200);
         assert_eq!(cfg.runtime_defaults.node_id, Some(0x100));
         assert!(cfg.runtime_defaults.preserve_nvm);
-        assert_eq!(cfg.runtime_defaults.initial_safe_pins.len(), 2);
-        assert_eq!(cfg.runtime_defaults.initial_safe_pins[0].pin, "PB15");
-        assert_eq!(cfg.runtime_defaults.initial_safe_pins[0].level, PinLevel::Low);
-        assert_eq!(cfg.runtime_defaults.initial_safe_pins[1].pin, "PA7");
-        assert_eq!(cfg.runtime_defaults.initial_safe_pins[1].level, PinLevel::High);
+        assert_eq!(
+            cfg.runtime_defaults.initial_safe_pins,
+            vec!["!PB15", "PA7", "^PB12"]
+        );
     }
 
     #[test]

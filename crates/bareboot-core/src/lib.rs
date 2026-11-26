@@ -254,7 +254,7 @@ impl BootLoopGuard {
 pub mod writer;
 pub use writer::{PagedWriter, WatchdogFeed, WatchdogFlash};
 pub mod safe_pins;
-pub use safe_pins::{apply_safe_pins, SafePin, PinLevel, PinDriver};
+pub use safe_pins::{apply_safe_pins, PinDriver, PinMode, SafePin};
 pub mod dispatch;
 pub use dispatch::{MultiTransportArbiter, ArbitrationState, ArbitrationAction};
 pub mod commit;

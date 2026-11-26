@@ -87,7 +87,22 @@ pub struct BuildJob {
     pub clean: bool,
 }
 
+/// Format resolved `initial_safe_pins` as a comma-separated Klipper-style string
+/// for `BAREBOOT_SAFE_PINS` and `CONFIG_INITIAL_PINS`.
+pub fn format_safe_pins_env(cfg: &crate::config::TargetConfig) -> String {
+    cfg.runtime_defaults.initial_safe_pins.join(",")
+}
+
 pub fn stream_cargo_build(job: BuildJob, output: Sender<UiEvent>) {
+    stream_cargo_build_with_config(job, None, output);
+}
+
+pub fn stream_cargo_build_with_config(
+    job: BuildJob,
+    target_cfg: Option<&crate::config::TargetConfig>,
+    output: Sender<UiEvent>,
+) {
+    let safe_pins_env = target_cfg.map(format_safe_pins_env).unwrap_or_default();
     thread::spawn(move || {
         if job.clean {
             let _ = output.send(UiEvent::Log {
@@ -109,6 +124,10 @@ pub fn stream_cargo_build(job: BuildJob, output: Sender<UiEvent>) {
 
         let mut command = Command::new("cargo");
         command.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if !safe_pins_env.is_empty() {
+            command.env("BAREBOOT_SAFE_PINS", &safe_pins_env);
+            command.env("CONFIG_INITIAL_PINS", &safe_pins_env);
+        }
 
         match command.spawn() {
             Ok(mut child) => {

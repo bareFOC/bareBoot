@@ -229,17 +229,24 @@ class I3cUsbFlasher:
         tx_data = make_frame(cmd, payload)
         t_start = time.perf_counter()
         self.client.private_write(self.addr, tx_data)
+        if cmd == CMD_BLOCK_WRITE and len(payload) >= 4:
+            blk_addr = int.from_bytes(payload[:4], "little")
+            if blk_addr % 8192 == 0 or (blk_addr + 64) % 8192 == 0:
+                time.sleep(0.10)
+        elif cmd in (CMD_RX_EOF, CMD_COMPLETE):
+            time.sleep(0.10)
         rx_data = b""
-        for _ in range(50):
+        parsed = None
+        for _ in range(150):
             try:
                 rx_data = self.client.private_read(self.addr, read_len)
-                break
+                parsed = parse_frame(rx_data)
+                if parsed is not None:
+                    break
             except Exception:
-                time.sleep(0.001)
-        else:
-            rx_data = self.client.private_read(self.addr, read_len)
+                pass
+            time.sleep(0.001)
         elapsed = time.perf_counter() - t_start
-        parsed = parse_frame(rx_data)
         return parsed, elapsed
 
     def connect_bootloader(self, retries: int = 15, retry_delay: float = 0.05) -> bool:
@@ -327,7 +334,7 @@ class I3cUsbFlasher:
         }
 
 
-def run_benchmark(image_path: str, freq_khz: int, dry_run: bool, scl: Optional[int] = None, sda: Optional[int] = None, swap_pins: bool = False) -> int:
+def run_benchmark(image_path: str, freq_khz: int, dry_run: bool, scl: Optional[int] = None, sda: Optional[int] = None, swap_pins: bool = False, no_swap_pins: bool = False) -> int:
     """Execute flashing workflow and display comparative benchmark report."""
     if not os.path.exists(image_path):
         # Generate dummy 100 KB payload if file doesn't exist
@@ -400,8 +407,8 @@ def run_benchmark(image_path: str, freq_khz: int, dry_run: bool, scl: Optional[i
 
     flasher = I3cUsbFlasher(client, addr=DEFAULT_DYNAMIC_ADDR, freq_khz=freq_khz)
     print("Connecting to BareBoot bootloader...")
-    if not flasher.connect_bootloader(retries=3):
-        if not dry_run and hasattr(client, "swap_pins"):
+    if not flasher.connect_bootloader(retries=6):
+        if not dry_run and not no_swap_pins and hasattr(client, "swap_pins"):
             print("Notice: Handshake unacknowledged on current pins. Attempting automatic pin inversion (swap SCL/SDA)...")
             scl, sda = client.swap_pins()
             print(f"Swapped pins to SCL=GP{scl}, SDA=GP{sda}. Retrying bootloader connect...")
@@ -454,6 +461,7 @@ def main():
     parser.add_argument("--scl", type=int, default=None, help="Explicit SCL GPIO pin on AgentLA")
     parser.add_argument("--sda", type=int, default=None, help="Explicit SDA GPIO pin on AgentLA")
     parser.add_argument("--swap-pins", "--invert-pins", action="store_true", help="Invert default SCL and SDA pin assignments")
+    parser.add_argument("--no-swap-pins", action="store_true", help="Disable automatic pin-inversion retry on handshake failure")
     parser.add_argument("--dry-run", "--mock", action="store_true", help="Run with simulated USB Bulk I3C hardware")
     args = parser.parse_args()
 
@@ -469,7 +477,7 @@ def main():
         except Exception:
             dry_run = True
 
-    sys.exit(run_benchmark(args.image, args.freq, dry_run, scl=args.scl, sda=args.sda, swap_pins=args.swap_pins))
+    sys.exit(run_benchmark(args.image, args.freq, dry_run, scl=args.scl, sda=args.sda, swap_pins=args.swap_pins, no_swap_pins=args.no_swap_pins))
 
 
 if __name__ == "__main__":

@@ -4,12 +4,15 @@
 use bareboot_core::dispatch::dispatch_one;
 use bareboot_core::writer::{PagedWriter, WatchdogFlash};
 use bareboot_core::{
-    check_and_clear_bootloader_request, crc32_update, validate_app_vector, BootConfig,
-    BootLoopGuard, CommitState, CoreError, FlashTarget, MonotonicCommitJournal,
+    apply_safe_pins, check_and_clear_bootloader_request, crc32_update, validate_app_vector,
+    BootConfig, BootLoopGuard, CommitState, CoreError, FlashTarget, MonotonicCommitJournal,
+    PinMode,
 };
 use bareboot_protocol::{ccc, SoftResetMailbox, REQUEST_BOOTLOADER};
 use core::ptr::{read_volatile, write_volatile};
 use cortex_m_rt::entry;
+
+include!(concat!(env!("OUT_DIR"), "/safe_pins_generated.rs"));
 
 const APP_BASE: u32 = 0x0800_2000;
 const APP_END: u32 = 0x0801_A000; // Sectors 1..12 (96 KiB)
@@ -420,11 +423,50 @@ fn verify_app_crc32(app_len: u32, expected_crc: u32) -> bool {
 
 fn init_hardware(static_addr: u8) {
     unsafe {
-        // Enable FLASH, GPIOA, GPIOB, I3C2 clocks
+        // Enable FLASH, GPIO clocks (A/B + any port in INITIAL_SAFE_PINS), I3C2 clock
+        let mut gpio_clocks: u32 = 0x03; // GPIOA | GPIOB
+        for sp in INITIAL_SAFE_PINS {
+            if ('A'..='H').contains(&sp.port) {
+                gpio_clocks |= 1u32 << ((sp.port as u32) - ('A' as u32));
+            }
+        }
         write_volatile(RCC_AHB1ENR, read_volatile(RCC_AHB1ENR) | (1 << 8) | (1 << 31));
-        write_volatile(RCC_AHB2ENR, read_volatile(RCC_AHB2ENR) | 0x03);
+        write_volatile(RCC_AHB2ENR, read_volatile(RCC_AHB2ENR) | gpio_clocks);
         write_volatile(RCC_APB3ENR, read_volatile(RCC_APB3ENR) | (1 << 9));
         let _ = read_volatile(RCC_APB3ENR);
+
+        // Apply configured safe pin states immediately on reset before peripheral init
+        apply_safe_pins(INITIAL_SAFE_PINS, &mut |port, pin, mode| {
+            if !('A'..='H').contains(&port) || pin > 15 {
+                return;
+            }
+            let gpio_base = GPIOA_BASE + ((port as u32) - ('A' as u32)) * 0x0400;
+            let moder = gpio_base as *mut u32;
+            let pupdr = (gpio_base + 0x0C) as *mut u32;
+            let bsrr = (gpio_base + 0x18) as *mut u32;
+            let shift = (pin as u32) * 2;
+            let mask = 0x03u32 << shift;
+            match mode {
+                PinMode::OutputLow => {
+                    write_volatile(bsrr, 1u32 << (pin as u32 + 16));
+                    write_volatile(pupdr, read_volatile(pupdr) & !mask);
+                    write_volatile(moder, (read_volatile(moder) & !mask) | (0x01 << shift));
+                }
+                PinMode::OutputHigh => {
+                    write_volatile(bsrr, 1u32 << (pin as u32));
+                    write_volatile(pupdr, read_volatile(pupdr) & !mask);
+                    write_volatile(moder, (read_volatile(moder) & !mask) | (0x01 << shift));
+                }
+                PinMode::InputPullUp => {
+                    write_volatile(moder, read_volatile(moder) & !mask);
+                    write_volatile(pupdr, (read_volatile(pupdr) & !mask) | (0x01 << shift));
+                }
+                PinMode::InputPullDown => {
+                    write_volatile(moder, read_volatile(moder) & !mask);
+                    write_volatile(pupdr, (read_volatile(pupdr) & !mask) | (0x02 << shift));
+                }
+            }
+        });
 
         // PA0 = LED_B (active LOW output)
         let moder_a = read_volatile(GPIOA_MODER);
@@ -636,11 +678,6 @@ fn main() -> ! {
                 }
             }
 
-            while tx_pos < tx_len && (read_volatile(I3C2_EVR) & EVR_TXFNFF != 0) {
-                write_volatile(I3C2_TDR, tx_buf[tx_pos] as u32);
-                tx_pos += 1;
-            }
-
             let evr_end = read_volatile(I3C2_EVR);
             if evr_end & (EVR_FCF | EVR_RXTGTENDF) != 0 {
                 while read_volatile(I3C2_EVR) & EVR_RXFNEF != 0 {
@@ -676,11 +713,23 @@ fn main() -> ! {
                                 }
                             }
                             write_volatile(I3C2_TGTTDR, (1 << 16) | (resp_len as u32));
-                            while tx_pos < tx_len
-                                && (read_volatile(I3C2_EVR) & EVR_TXFNFF != 0)
-                            {
-                                write_volatile(I3C2_TDR, tx_buf[tx_pos] as u32);
-                                tx_pos += 1;
+                            // Tightly drain the entire TX response into the 8-byte FIFO
+                            // without main-loop SysTick/SDA-check jitter so 1+ MHz SDR reads
+                            // never underrun after the first 8 bytes.
+                            let mut wait_spins: u32 = 0;
+                            while tx_pos < tx_len && wait_spins < 500_000 {
+                                iwdg_feed();
+                                let ev = read_volatile(I3C2_EVR);
+                                if ev & EVR_TXFNFF != 0 {
+                                    write_volatile(I3C2_TDR, tx_buf[tx_pos] as u32);
+                                    tx_pos += 1;
+                                    wait_spins = 0;
+                                    continue;
+                                }
+                                if ev & (EVR_RXFNEF | EVR_ERRF | EVR_RSTF | EVR_DAUPDF) != 0 {
+                                    break;
+                                }
+                                wait_spins += 1;
                             }
                         }
                     }

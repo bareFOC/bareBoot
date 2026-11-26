@@ -1,36 +1,74 @@
 //! Initial safe pin execution on target microcontroller reset.
 //!
-//! Applies configured safe pin levels (e.g. gate driver sleep low, bridge enables low)
+//! Applies configured Klipper-style safe pin states (`!pin` = OutputLow,
+//! `pin` = OutputHigh, `^pin` = InputPullUp, `~pin` = InputPullDown)
 //! immediately on boot before peripheral clocks or transport listeners are started.
 
+/// Pin configuration mode at bootloader startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PinLevel {
-    Low,
-    High,
+pub enum PinMode {
+    /// Push-pull output driven low (`!PA9`).
+    OutputLow,
+    /// Push-pull output driven high (`PA9`).
+    OutputHigh,
+    /// Input with internal pull-up (`^PB12` / `^!PB12`).
+    InputPullUp,
+    /// Input with internal pull-down (`~PB12` / `~!PB12`).
+    InputPullDown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SafePin {
     pub port: char,
     pub pin: u8,
-    pub level: PinLevel,
+    pub mode: PinMode,
 }
 
 impl SafePin {
-    pub const fn new(port: char, pin: u8, level: PinLevel) -> Self {
-        Self { port, pin, level }
+    pub const fn new(port: char, pin: u8, mode: PinMode) -> Self {
+        Self { port, pin, mode }
     }
 
-    /// Parse a pin specification string such as "PB15:low" or "PA7:high" or "PC13".
+    /// Parse a Klipper-style pin specification string:
+    /// - `"!PB15"` -> `OutputLow`
+    /// - `"PA7"`   -> `OutputHigh`
+    /// - `"^PB12"` or `"^!PB12"` -> `InputPullUp`
+    /// - `"~PC13"` or `"~!PC13"` -> `InputPullDown`
     pub fn parse(s: &str) -> Result<Self, ()> {
-        let trimmed = s.trim();
-        let (pin_part, level_part) = if let Some((p, l)) = trimmed.split_once(':') {
-            (p.trim(), l.trim())
+        let mut rest = s.trim();
+        if rest.is_empty() {
+            return Err(());
+        }
+
+        let mut inverted = false;
+        let mut pull_up = false;
+        let mut pull_down = false;
+
+        while let Some(first) = rest.as_bytes().first().copied() {
+            match first {
+                b'!' => inverted = true,
+                b'^' => pull_up = true,
+                b'~' => pull_down = true,
+                _ => break,
+            }
+            rest = &rest[1..];
+        }
+
+        if pull_up && pull_down {
+            return Err(());
+        }
+
+        let mode = if pull_up {
+            PinMode::InputPullUp
+        } else if pull_down {
+            PinMode::InputPullDown
+        } else if inverted {
+            PinMode::OutputLow
         } else {
-            (trimmed, "low")
+            PinMode::OutputHigh
         };
 
-        let bytes = pin_part.as_bytes();
+        let bytes = rest.as_bytes();
         if bytes.len() < 2 {
             return Err(());
         }
@@ -48,55 +86,52 @@ impl SafePin {
         }
 
         let num_str = core::str::from_utf8(&bytes[num_start..]).map_err(|_| ())?;
+        if num_str.is_empty() {
+            return Err(());
+        }
         let pin_num: u8 = num_str.parse().map_err(|_| ())?;
         if pin_num > 31 {
             return Err(());
         }
 
-        let level = match level_part {
-            "low" | "LOW" | "0" => PinLevel::Low,
-            "high" | "HIGH" | "1" => PinLevel::High,
-            _ => return Err(()),
-        };
-
         Ok(Self {
             port: port_char,
             pin: pin_num,
-            level,
+            mode,
         })
     }
 }
 
 pub trait PinDriver {
-    fn set_level(&mut self, port: char, pin: u8, level: PinLevel);
+    fn configure(&mut self, port: char, pin: u8, mode: PinMode);
 }
 
 impl<F> PinDriver for F
 where
-    F: FnMut(char, u8, PinLevel),
+    F: FnMut(char, u8, PinMode),
 {
-    fn set_level(&mut self, port: char, pin: u8, level: PinLevel) {
-        self(port, pin, level);
+    fn configure(&mut self, port: char, pin: u8, mode: PinMode) {
+        self(port, pin, mode);
     }
 }
 
-/// Apply configured initial safe pins using a PinDriver.
+/// Apply configured initial safe pins using a [`PinDriver`].
 pub fn apply_safe_pins<D: PinDriver>(pins: &[SafePin], driver: &mut D) {
     for pin in pins {
-        driver.set_level(pin.port, pin.pin, pin.level);
+        driver.configure(pin.port, pin.pin, pin.mode);
     }
 }
 
 /// Macro for declarative static definition of initial safe pins.
 #[macro_export]
 macro_rules! initial_safe_pins {
-    ($( ($port:expr, $pin:expr, $level:ident) ),* $(,)?) => {
+    ($( ($port:expr, $pin:expr, $mode:ident) ),* $(,)?) => {
         [
             $(
                 $crate::safe_pins::SafePin {
                     port: $port,
                     pin: $pin,
-                    level: $crate::safe_pins::PinLevel::$level,
+                    mode: $crate::safe_pins::PinMode::$mode,
                 },
             )*
         ]
@@ -108,44 +143,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_pin() {
-        let p1 = SafePin::parse("PB15:low").unwrap();
-        assert_eq!(p1, SafePin::new('B', 15, PinLevel::Low));
+    fn test_parse_klipper_pin() {
+        assert_eq!(
+            SafePin::parse("!PB15").unwrap(),
+            SafePin::new('B', 15, PinMode::OutputLow)
+        );
+        assert_eq!(
+            SafePin::parse("PA7").unwrap(),
+            SafePin::new('A', 7, PinMode::OutputHigh)
+        );
+        assert_eq!(
+            SafePin::parse("^!PB12").unwrap(),
+            SafePin::new('B', 12, PinMode::InputPullUp)
+        );
+        assert_eq!(
+            SafePin::parse("~PC13").unwrap(),
+            SafePin::new('C', 13, PinMode::InputPullDown)
+        );
+        assert_eq!(
+            SafePin::parse("!B1").unwrap(),
+            SafePin::new('B', 1, PinMode::OutputLow)
+        );
 
-        let p2 = SafePin::parse("PA7:high").unwrap();
-        assert_eq!(p2, SafePin::new('A', 7, PinLevel::High));
-
-        let p3 = SafePin::parse("B1:0").unwrap();
-        assert_eq!(p3, SafePin::new('B', 1, PinLevel::Low));
-
-        let p4 = SafePin::parse("PC13").unwrap();
-        assert_eq!(p4, SafePin::new('C', 13, PinLevel::Low));
-
+        assert!(SafePin::parse("PB15:low").is_err());
+        assert!(SafePin::parse("^~PB12").is_err());
         assert!(SafePin::parse("invalid").is_err());
-        assert!(SafePin::parse("PB99:low").is_err());
+        assert!(SafePin::parse("PB99").is_err());
     }
 
     #[test]
     fn test_macro_and_apply() {
         let pins = initial_safe_pins![
-            ('B', 15, Low),
-            ('B', 1, Low),
-            ('B', 0, Low),
-            ('A', 7, Low),
+            ('B', 15, OutputLow),
+            ('B', 1, OutputHigh),
+            ('B', 12, InputPullUp),
+            ('C', 13, InputPullDown),
         ];
         assert_eq!(pins.len(), 4);
 
-        let mut applied = [( ' ', 0u8, PinLevel::High ); 4];
+        let mut applied = [(' ', 0u8, PinMode::OutputHigh); 4];
         let mut count = 0;
-        apply_safe_pins(&pins, &mut |port, pin, level| {
-            applied[count] = (port, pin, level);
+        apply_safe_pins(&pins, &mut |port, pin, mode| {
+            applied[count] = (port, pin, mode);
             count += 1;
         });
 
         assert_eq!(count, 4);
-        assert_eq!(applied[0], ('B', 15, PinLevel::Low));
-        assert_eq!(applied[1], ('B', 1, PinLevel::Low));
-        assert_eq!(applied[2], ('B', 0, PinLevel::Low));
-        assert_eq!(applied[3], ('A', 7, PinLevel::Low));
+        assert_eq!(applied[0], ('B', 15, PinMode::OutputLow));
+        assert_eq!(applied[1], ('B', 1, PinMode::OutputHigh));
+        assert_eq!(applied[2], ('B', 12, PinMode::InputPullUp));
+        assert_eq!(applied[3], ('C', 13, PinMode::InputPullDown));
     }
 }
