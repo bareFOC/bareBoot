@@ -40,6 +40,10 @@ impl ArchBoot for CortexMArch {
             cortex_m::asm::dsb();
             cortex_m::asm::isb();
 
+            // Restore reset-default PRIMASK=0 before entering the application;
+            // all NVIC and SysTick sources are already disabled above.
+            cortex_m::interrupt::enable();
+
             #[cfg(target_arch = "arm")]
             cortex_m::asm::bootstrap(sp as *const u32, reset_handler as *const u32);
 
