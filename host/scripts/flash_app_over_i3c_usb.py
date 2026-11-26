@@ -14,7 +14,7 @@ import os
 import struct
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Attempt import of AgentLaI3c from AgentLA SDK
 SDK_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../AgentLA-rust/sdk"))
@@ -40,14 +40,24 @@ CMD_RX_EOF      = 0x13
 CMD_REQ_BLOCK   = 0x14
 CMD_COMPLETE    = 0x15
 RESP_ACK        = 0xA0
-RESP_NACK       = 0xA1
+RESP_NACK       = 0xF1
+RESP_CMD_ERR    = 0xF2
 
 
-def trigger_inband_reboot_and_switch(client: Optional[Any] = None) -> bool:
-    """Send in-band 0xF0 reboot strobe to 0x40 directly via AgentLA USB Bulk adapter,
+def trigger_inband_reboot_and_switch(
+    client: Optional[Any] = None,
+    target_addr: int = DEFAULT_DYNAMIC_ADDR,
+) -> bool:
+    """Send in-band 0xF0 reboot strobe via both I3C SDR private_write and open-drain I2C,
     followed by broadcast ping to 0x7E to trigger BareBoot hardware switch to MIPI I3C.
     """
     if client is not None:
+        print(f"Sending in-band reboot strobe 0xF0 to 0x{target_addr:02X} over I3C SDR (private_write)...")
+        try:
+            client.private_write(target_addr, bytes([0xF0]))
+        except Exception as e:
+            print(f"Notice: I3C SDR reboot strobe write: {e}")
+
         print("Sending in-band reboot strobe 0xF0 to 0x40 over USB Bulk (open-drain I2C)...")
         try:
             client.i2c_write(0x40, bytes([0xF0]))
@@ -407,7 +417,26 @@ def run_benchmark(image_path: str, freq_khz: int, dry_run: bool, scl: Optional[i
 
     flasher = I3cUsbFlasher(client, addr=DEFAULT_DYNAMIC_ADDR, freq_khz=freq_khz)
     print("Connecting to BareBoot bootloader...")
-    if not flasher.connect_bootloader(retries=6):
+    connected = flasher.connect_bootloader(retries=6)
+    if not connected and not dry_run and dev_info is not None:
+        # Target answered ENTDAA in I3C SDR mode (likely running application firmware);
+        # send in-band 0xF0 over I3C SDR and re-enumerate BareBoot.
+        print("ENTDAA device did not answer CMD_CONNECT; sending I3C SDR 0xF0 reboot strobe...")
+        trigger_inband_reboot_and_switch(
+            client=client,
+            target_addr=dev_info.get("dynamic_address", DEFAULT_DYNAMIC_ADDR),
+        )
+        try:
+            client.rstdaa()
+        except Exception:
+            pass
+        try:
+            dev_info = client.entdaa(DEFAULT_DYNAMIC_ADDR)
+        except Exception as e:
+            print(f"ENTDAA retry after I3C SDR 0xF0 failed: {e}")
+        connected = flasher.connect_bootloader(retries=6)
+
+    if not connected:
         if not dry_run and not no_swap_pins and hasattr(client, "swap_pins"):
             print("Notice: Handshake unacknowledged on current pins. Attempting automatic pin inversion (swap SCL/SDA)...")
             scl, sda = client.swap_pins()
