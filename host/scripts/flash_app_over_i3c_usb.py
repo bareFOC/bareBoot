@@ -44,12 +44,73 @@ RESP_NACK       = 0xF1
 RESP_CMD_ERR    = 0xF2
 
 
+def scan_i3c_bus(client: Any, start_addr: int = DEFAULT_DYNAMIC_ADDR, max_targets: int = 32) -> List[Dict[str, Any]]:
+    """Run RSTDAA and loop ENTDAA from start_addr until no more targets respond."""
+    try:
+        client.rstdaa()
+    except Exception:
+        pass
+    targets: List[Dict[str, Any]] = []
+    for offset in range(max_targets):
+        proposed = start_addr + offset
+        if proposed > 0x77:
+            break
+        try:
+            info = client.entdaa(proposed)
+        except Exception:
+            break
+        if info is None:
+            break
+        targets.append(info)
+    return targets
+
+
+def format_target_line(info: Dict[str, Any]) -> str:
+    """Format an enumerated I3C target dictionary for human-readable output."""
+    addr = info.get("dynamic_address", 0)
+    pid = info.get("provisional_id", "unknown")
+    bcr = info.get("bcr")
+    dcr = info.get("dcr")
+    bcr_str = f"0x{bcr:02X}" if isinstance(bcr, int) else "n/a"
+    dcr_str = f"0x{dcr:02X}" if isinstance(dcr, int) else "n/a"
+    return f"  addr=0x{addr:02X}  pid={pid}  bcr={bcr_str}  dcr={dcr_str}"
+
+
+def select_target_by_pid(targets: List[Dict[str, Any]], pid_query: str) -> Dict[str, Any]:
+    """Select a single target from enumerated targets by exact or prefix PID match."""
+    norm_query = pid_query.strip().lower()
+    if norm_query.startswith("0x"):
+        norm_query = norm_query[2:]
+    if not norm_query:
+        raise ValueError("Empty --pid query")
+    matches = [
+        t for t in targets
+        if t.get("provisional_id", "").lower().startswith(norm_query)
+    ]
+    if not matches:
+        available = ", ".join(
+            f"0x{t.get('dynamic_address', 0):02X}:{t.get('provisional_id', '?')}"
+            for t in targets
+        ) or "none"
+        raise ValueError(f"No I3C target matched PID '{pid_query}'. Available: {available}")
+    if len(matches) > 1:
+        matched = ", ".join(
+            f"0x{t.get('dynamic_address', 0):02X}:{t.get('provisional_id', '?')}"
+            for t in matches
+        )
+        raise ValueError(f"Ambiguous PID prefix '{pid_query}' matched {len(matches)} targets: {matched}")
+    return matches[0]
+
+
 def trigger_inband_reboot_and_switch(
     client: Optional[Any] = None,
     target_addr: int = DEFAULT_DYNAMIC_ADDR,
+    selective: bool = False,
 ) -> bool:
-    """Send in-band 0xF0 reboot strobe via both I3C SDR private_write and open-drain I2C,
-    followed by broadcast ping to 0x7E to trigger BareBoot hardware switch to MIPI I3C.
+    """Send in-band 0xF0 reboot strobe to target_addr.
+
+    When selective=True (multi-servo bus), only unicast I3C SDR private_write(0xF0)
+    is sent to target_addr so sibling servos on the bus are not disturbed.
     """
     if client is not None:
         print(f"Sending in-band reboot strobe 0xF0 to 0x{target_addr:02X} over I3C SDR (private_write)...")
@@ -58,19 +119,21 @@ def trigger_inband_reboot_and_switch(
         except Exception as e:
             print(f"Notice: I3C SDR reboot strobe write: {e}")
 
-        print("Sending in-band reboot strobe 0xF0 to 0x40 over USB Bulk (open-drain I2C)...")
-        try:
-            client.i2c_write(0x40, bytes([0xF0]))
-        except Exception as e:
-            print(f"Notice: Reboot strobe write: {e}")
+        if not selective:
+            print(f"Sending in-band reboot strobe 0xF0 to 0x{target_addr:02X} over USB Bulk (open-drain I2C)...")
+            try:
+                client.i2c_write(target_addr, bytes([0xF0]))
+            except Exception as e:
+                print(f"Notice: Reboot strobe write: {e}")
         time.sleep(0.3)
 
-        print("Pinging I3C broadcast address 0x7E to trigger hardware switch to I3C...")
-        try:
-            client.i2c_write(0x7E, bytes([0x00]))
-        except Exception as e:
-            print(f"Notice: Ping 0x7E write: {e}")
-        time.sleep(0.05)
+        if not selective:
+            print("Pinging I3C broadcast address 0x7E to trigger hardware switch to I3C...")
+            try:
+                client.i2c_write(0x7E, bytes([0x00]))
+            except Exception as e:
+                print(f"Notice: Ping 0x7E write: {e}")
+            time.sleep(0.05)
         return True
     return False
 
@@ -134,6 +197,7 @@ class MockAgentLaI3c:
         self.rx_bytes_count = 0
         self.scl_pin = 10
         self.sda_pin = 11
+        self._entdaa_done = False
 
     def set_pins(self, scl: int, sda: int):
         self.scl_pin = scl
@@ -159,9 +223,12 @@ class MockAgentLaI3c:
         pass
 
     def rstdaa(self):
-        pass
+        self._entdaa_done = False
 
     def entdaa(self, proposed_addr: int = 0x40) -> Optional[dict]:
+        if self._entdaa_done:
+            return None
+        self._entdaa_done = True
         self.dynamic_address = proposed_addr
         return {
             "dynamic_address": proposed_addr,
@@ -346,7 +413,52 @@ class I3cUsbFlasher:
         }
 
 
-def run_benchmark(image_path: str, freq_khz: int, dry_run: bool, scl: Optional[int] = None, sda: Optional[int] = None, swap_pins: bool = False, no_swap_pins: bool = False) -> int:
+def run_scan(
+    freq_khz: int,
+    dry_run: bool,
+    scl: Optional[int] = None,
+    sda: Optional[int] = None,
+    swap_pins: bool = False,
+) -> int:
+    """Scan the I3C bus via RSTDAA + ENTDAA and print all discovered targets."""
+    if dry_run:
+        client = MockAgentLaI3c(freq_khz=freq_khz)
+        client.connect()
+    else:
+        if not HAVE_AGENTLA_SDK:
+            print("ERROR: agentla Python SDK not found. Install or add to PYTHONPATH.")
+            return 1
+        client = AgentLaI3c()
+        if not client.connect():
+            print("ERROR: AgentLA USB Bulk device not found or unable to claim interface.")
+            return 2
+        if scl is not None and sda is not None:
+            client.set_pins(scl, sda)
+        elif swap_pins:
+            client.swap_pins()
+        client.set_bus_speed(freq_khz)
+
+    try:
+        targets = scan_i3c_bus(client, start_addr=DEFAULT_DYNAMIC_ADDR)
+        print(f"Discovered {len(targets)} I3C target(s):")
+        for info in targets:
+            print(format_target_line(info))
+        return 0
+    finally:
+        client.close()
+
+
+def run_benchmark(
+    image_path: str,
+    freq_khz: int,
+    dry_run: bool,
+    scl: Optional[int] = None,
+    sda: Optional[int] = None,
+    swap_pins: bool = False,
+    no_swap_pins: bool = False,
+    target_addr: Optional[int] = None,
+    target_pid: Optional[str] = None,
+) -> int:
     """Execute flashing workflow and display comparative benchmark report."""
     if not os.path.exists(image_path):
         # Generate dummy 100 KB payload if file doesn't exist
@@ -362,11 +474,21 @@ def run_benchmark(image_path: str, freq_khz: int, dry_run: bool, scl: Optional[i
     print(f"Target Firmware: {len(img_data)} bytes (sha256: {img_sha256})")
     print(f"Bus Frequency: {freq_khz} kHz ({freq_khz / 1000.0:.2f} MHz SDR)")
 
+    selective_mode = target_addr is not None or target_pid is not None
+    active_addr = target_addr if target_addr is not None else DEFAULT_DYNAMIC_ADDR
+
     client = None
+    dev_info = None
     if dry_run:
         print("Transport: MockAgentLaI3c (Simulated USB Bulk EP9)")
         client = MockAgentLaI3c(freq_khz=freq_khz)
         client.connect()
+        if target_pid is not None:
+            targets = scan_i3c_bus(client, start_addr=DEFAULT_DYNAMIC_ADDR)
+            dev_info = select_target_by_pid(targets, target_pid)
+            active_addr = dev_info["dynamic_address"]
+        elif target_addr is not None:
+            client.dynamic_address = active_addr
     else:
         if not HAVE_AGENTLA_SDK:
             print("ERROR: agentla Python SDK not found. Install or add to PYTHONPATH.")
@@ -386,54 +508,80 @@ def run_benchmark(image_path: str, freq_khz: int, dry_run: bool, scl: Optional[i
             print(f"Pins swapped by user flag: SCL=GP{scl}, SDA=GP{sda}")
 
         client.set_bus_speed(freq_khz)
-        print("Checking target dynamic address via ENTDAA...")
-        dev_info = None
-        try:
-            dev_info = client.entdaa(DEFAULT_DYNAMIC_ADDR)
-        except Exception:
-            pass
 
-        if dev_info is None:
-            print("Target not in I3C mode. Triggering in-band reboot into BareBoot and switching to I3C...")
-            trigger_inband_reboot_and_switch(client=client)
+        if target_pid is not None:
+            print(f"Scanning I3C bus for target matching PID '{target_pid}'...")
+            targets = scan_i3c_bus(client, start_addr=DEFAULT_DYNAMIC_ADDR)
+            try:
+                dev_info = select_target_by_pid(targets, target_pid)
+            except ValueError as e:
+                print(f"ERROR: {e}")
+                client.close()
+                return 4
+            active_addr = dev_info["dynamic_address"]
+            print(f"Matched target:{format_target_line(dev_info)}")
+        elif target_addr is not None:
+            print(f"Selective OTA mode targeting dynamic address 0x{active_addr:02X} (skipping RSTDAA)...")
+            try:
+                dev_info = client.entdaa(active_addr)
+                if dev_info is not None:
+                    active_addr = dev_info.get("dynamic_address", active_addr)
+            except Exception:
+                pass
+        else:
+            print("Checking target dynamic address via ENTDAA...")
+            try:
+                dev_info = client.entdaa(active_addr)
+            except Exception:
+                pass
+
+            if dev_info is None:
+                print("Target not in I3C mode. Triggering in-band reboot into BareBoot and switching to I3C...")
+                trigger_inband_reboot_and_switch(client=client, target_addr=active_addr, selective=False)
+                try:
+                    client.rstdaa()
+                except Exception:
+                    pass
+                try:
+                    dev_info = client.entdaa(active_addr)
+                except Exception as e:
+                    print(f"ENTDAA retry after switch failed: {e}")
+
+                if dev_info is None and hasattr(client, "swap_pins"):
+                    print("Notice: ENTDAA failed on current pins. Trying swapped pin orientation...")
+                    client.swap_pins()
+                    trigger_inband_reboot_and_switch(client=client, target_addr=active_addr, selective=False)
+                    try:
+                        client.rstdaa()
+                        dev_info = client.entdaa(active_addr)
+                    except Exception as e:
+                        print(f"ENTDAA on swapped pins failed: {e}")
+
+            print(f"ENTDAA assigned address: {dev_info}")
+
+    flasher = I3cUsbFlasher(client, addr=active_addr, freq_khz=freq_khz)
+    print(f"Connecting to BareBoot bootloader at 0x{active_addr:02X}...")
+    connected = flasher.connect_bootloader(retries=6)
+    if not connected and not dry_run and (dev_info is not None or selective_mode):
+        # Target answered ENTDAA in I3C SDR mode (likely running application firmware);
+        # send unicast in-band 0xF0 over I3C SDR and re-enumerate BareBoot without RSTDAA
+        # in selective mode so sibling servos retain their dynamic addresses.
+        print(f"Target at 0x{active_addr:02X} did not answer CMD_CONNECT; sending unicast I3C SDR 0xF0 reboot strobe...")
+        trigger_inband_reboot_and_switch(
+            client=client,
+            target_addr=active_addr,
+            selective=selective_mode,
+        )
+        if not selective_mode:
             try:
                 client.rstdaa()
             except Exception:
                 pass
-            try:
-                dev_info = client.entdaa(DEFAULT_DYNAMIC_ADDR)
-            except Exception as e:
-                print(f"ENTDAA retry after switch failed: {e}")
-
-            if dev_info is None and hasattr(client, "swap_pins"):
-                print("Notice: ENTDAA failed on current pins. Trying swapped pin orientation...")
-                client.swap_pins()
-                trigger_inband_reboot_and_switch(client=client)
-                try:
-                    client.rstdaa()
-                    dev_info = client.entdaa(DEFAULT_DYNAMIC_ADDR)
-                except Exception as e:
-                    print(f"ENTDAA on swapped pins failed: {e}")
-
-        print(f"ENTDAA assigned address: {dev_info}")
-
-    flasher = I3cUsbFlasher(client, addr=DEFAULT_DYNAMIC_ADDR, freq_khz=freq_khz)
-    print("Connecting to BareBoot bootloader...")
-    connected = flasher.connect_bootloader(retries=6)
-    if not connected and not dry_run and dev_info is not None:
-        # Target answered ENTDAA in I3C SDR mode (likely running application firmware);
-        # send in-band 0xF0 over I3C SDR and re-enumerate BareBoot.
-        print("ENTDAA device did not answer CMD_CONNECT; sending I3C SDR 0xF0 reboot strobe...")
-        trigger_inband_reboot_and_switch(
-            client=client,
-            target_addr=dev_info.get("dynamic_address", DEFAULT_DYNAMIC_ADDR),
-        )
         try:
-            client.rstdaa()
-        except Exception:
-            pass
-        try:
-            dev_info = client.entdaa(DEFAULT_DYNAMIC_ADDR)
+            dev_info = client.entdaa(active_addr)
+            if dev_info is not None:
+                active_addr = dev_info.get("dynamic_address", active_addr)
+                flasher.addr = active_addr
         except Exception as e:
             print(f"ENTDAA retry after I3C SDR 0xF0 failed: {e}")
         connected = flasher.connect_bootloader(retries=6)
@@ -488,6 +636,9 @@ def run_benchmark(image_path: str, freq_khz: int, dry_run: bool, scl: Optional[i
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image", nargs="?", default=DEFAULT_IMAGE, help="Firmware binary path")
+    parser.add_argument("--scan", action="store_true", help="Scan I3C bus via RSTDAA + ENTDAA and print all targets")
+    parser.add_argument("--addr", type=lambda s: int(s, 0), default=None, help="Target dynamic address (hex or int, e.g. 0x41)")
+    parser.add_argument("--pid", type=str, default=None, help="Select target by 48-bit Provisional ID (exact or prefix hex)")
     parser.add_argument("--freq", type=int, default=DEFAULT_FREQ_KHZ, help="I3C SCL clock in kHz (default: 12500)")
     parser.add_argument("--scl", type=int, default=None, help="Explicit SCL GPIO pin on AgentLA")
     parser.add_argument("--sda", type=int, default=None, help="Explicit SDA GPIO pin on AgentLA")
@@ -508,7 +659,22 @@ def main():
         except Exception:
             dry_run = True
 
-    sys.exit(run_benchmark(args.image, args.freq, dry_run, scl=args.scl, sda=args.sda, swap_pins=args.swap_pins, no_swap_pins=args.no_swap_pins))
+    if args.scan:
+        sys.exit(run_scan(args.freq, dry_run, scl=args.scl, sda=args.sda, swap_pins=args.swap_pins))
+
+    sys.exit(
+        run_benchmark(
+            args.image,
+            args.freq,
+            dry_run,
+            scl=args.scl,
+            sda=args.sda,
+            swap_pins=args.swap_pins,
+            no_swap_pins=args.no_swap_pins,
+            target_addr=args.addr,
+            target_pid=args.pid,
+        )
+    )
 
 
 if __name__ == "__main__":
