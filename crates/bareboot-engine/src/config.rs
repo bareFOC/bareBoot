@@ -12,63 +12,164 @@ fn default_preserve_nvm() -> bool {
     true
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_bootloader_type() -> String {
+    "bareboot".to_string()
+}
+
+fn default_system_clock() -> u32 {
+    64_000_000
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeDefaults {
     #[serde(default = "default_boot_window")]
     pub boot_window_ms: u32,
     #[serde(default)]
-    pub node_id: Option<u32>,
+    pub address: Option<u8>,
     #[serde(default)]
-    pub i2c_address: Option<u8>,
-    #[serde(default)]
-    pub uart_baud: Option<u32>,
+    pub bitrate: Option<u32>,
     #[serde(default = "default_preserve_nvm")]
     pub preserve_nvm: bool,
     /// Klipper-style safe startup pin specs (e.g. `"!PA9"`, `"PB1"`, `"^PB12"`).
     #[serde(default)]
     pub initial_safe_pins: Vec<String>,
+    #[serde(default)]
+    pub mailbox_address: Option<u32>,
+    #[serde(default)]
+    pub mailbox_magic: Option<u64>,
 }
 
 impl Default for RuntimeDefaults {
     fn default() -> Self {
         Self {
             boot_window_ms: default_boot_window(),
-            node_id: None,
-            i2c_address: None,
-            uart_baud: None,
+            address: None,
+            bitrate: None,
             preserve_nvm: default_preserve_nvm(),
             initial_safe_pins: Vec::new(),
+            mailbox_address: None,
+            mailbox_magic: None,
         }
     }
 }
 
+/// Unified `[memory]` section matching `barefoc.toml` and `bareboot.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TargetMemoryConfig {
     #[serde(default)]
-    pub flash_start: Option<u32>,
+    pub flash_origin: Option<u32>,
     #[serde(default)]
     pub flash_size: Option<u32>,
     #[serde(default)]
+    pub ram_origin: Option<u32>,
+    #[serde(default)]
+    pub ram_size: Option<u32>,
+    #[serde(default)]
+    pub bootloader_origin: Option<u32>,
+    #[serde(default)]
     pub bootloader_size: Option<u32>,
     #[serde(default)]
-    pub app_base: Option<u32>,
+    pub app_origin: Option<u32>,
     #[serde(default)]
-    pub app_end: Option<u32>,
+    pub app_size: Option<u32>,
     #[serde(default)]
-    pub nvm_base: Option<u32>,
+    pub nvm_origin: Option<u32>,
+    #[serde(default)]
+    pub nvm_size: Option<u32>,
     #[serde(default)]
     pub page_size: Option<u32>,
 }
 
-fn default_transport() -> String {
-    "can".to_string()
+/// Unified `[board]` section matching `barefoc.toml` and `bareboot.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TargetBoardConfig {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub mcu: String,
+    #[serde(default)]
+    pub family: String,
+    #[serde(default = "default_system_clock")]
+    pub system_clock_hz: u32,
+}
+
+impl Default for TargetBoardConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            mcu: "stm32f103".to_string(),
+            family: "stm32f1".to_string(),
+            system_clock_hz: default_system_clock(),
+        }
+    }
+}
+
+/// Unified `[communication]` section matching `barefoc.toml` and `bareboot.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TargetCommunicationConfig {
+    #[serde(default)]
+    pub transports: Vec<String>,
+    #[serde(default)]
+    pub transport: Option<String>,
+    #[serde(default)]
+    pub tx_scl_pin: Option<String>,
+    #[serde(default)]
+    pub rx_sda_pin: Option<String>,
+    #[serde(default)]
+    pub can_enable_pin: Option<String>,
+    #[serde(default)]
+    pub bitrate: Option<u32>,
+    #[serde(default)]
+    pub address: Option<u8>,
+}
+
+/// Unified `[bootloader]` section matching `barefoc.toml` and `bareboot.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TargetBootloaderConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(rename = "type", default = "default_bootloader_type")]
+    pub bootloader_type: String,
+    #[serde(default = "default_boot_window")]
+    pub boot_window_ms: u32,
+    #[serde(default = "default_preserve_nvm")]
+    pub preserve_nvm: bool,
+    #[serde(default)]
+    pub initial_safe_pins: Vec<String>,
+    #[serde(default)]
+    pub mailbox_address: Option<u32>,
+    #[serde(default)]
+    pub mailbox_magic: Option<u64>,
+}
+
+impl Default for TargetBootloaderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bootloader_type: default_bootloader_type(),
+            boot_window_ms: default_boot_window(),
+            preserve_nvm: default_preserve_nvm(),
+            initial_safe_pins: Vec::new(),
+            mailbox_address: None,
+            mailbox_magic: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TargetConfig {
     pub target: String,
-    #[serde(default = "default_transport")]
     pub transport: String,
+    #[serde(default)]
+    pub board: TargetBoardConfig,
+    #[serde(default)]
+    pub communication: TargetCommunicationConfig,
+    #[serde(default)]
+    pub bootloader: TargetBootloaderConfig,
     #[serde(default)]
     pub runtime_defaults: RuntimeDefaults,
     #[serde(default)]
@@ -81,7 +182,7 @@ impl TargetConfig {
             return Err("target must not be empty".to_string());
         }
         match self.transport.as_str() {
-            "can" | "i2c" | "uart" | "usb" | "multi" => {}
+            "can" | "i2c" | "i3c" | "uart" | "usb" | "multi" => {}
             other => return Err(format!("unsupported transport: {other}")),
         }
         if self.runtime_defaults.boot_window_ms < 50 {
@@ -99,6 +200,14 @@ impl TargetConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct UnifiedTomlFile<'a> {
+    board: &'a TargetBoardConfig,
+    memory: &'a TargetMemoryConfig,
+    communication: &'a TargetCommunicationConfig,
+    bootloader: &'a TargetBootloaderConfig,
+}
+
 fn parse_u32_val(val: &toml::Value) -> Option<u32> {
     match val {
         toml::Value::Integer(i) => Some(*i as u32),
@@ -114,11 +223,26 @@ fn parse_u32_val(val: &toml::Value) -> Option<u32> {
     }
 }
 
+fn parse_u64_val(val: &toml::Value) -> Option<u64> {
+    match val {
+        toml::Value::Integer(i) => Some(*i as u64),
+        toml::Value::String(s) => {
+            let trimmed = s.trim();
+            if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                trimmed.parse::<u64>().ok()
+            }
+        }
+        _ => None,
+    }
+}
+
 fn parse_u8_val(val: &toml::Value) -> Option<u8> {
     parse_u32_val(val).map(|v| v as u8)
 }
 
-fn parse_safe_pins_val(val: &toml::Value) -> Vec<String> {
+fn parse_string_list(val: &toml::Value) -> Vec<String> {
     let mut out = Vec::new();
     if let toml::Value::Array(arr) = val {
         for item in arr {
@@ -159,10 +283,6 @@ fn push_unique_pin(out: &mut Vec<String>, seen: &mut Vec<String>, spec: String, 
 }
 
 /// Auto-derive Klipper-style safe startup pins from `[gate_driver]`.
-///
-/// Active-high output pins (no `!`, e.g. `sleep_pin = "PA9"`) are inverted to `!PA9`
-/// (`OutputLow`). Active-low output pins (`!` prefix, e.g. `enable_pin = "!PB1"`)
-/// become `PB1` (`OutputHigh`). Input pins (`fault_pin`) preserve `^` / `~` pulls.
 fn derive_safe_pins_from_gate_driver(gd: &toml::map::Map<String, toml::Value>) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = Vec::new();
@@ -206,179 +326,161 @@ fn derive_safe_pins_from_gate_driver(gd: &toml::map::Map<String, toml::Value>) -
     out
 }
 
-/// Dual parser: parses either a standalone bareboot.toml or a barefoc.toml
-/// containing [bootloader], [mcu]/[board], [memory], and optional [gate_driver] sections.
+/// Unified parser for both `bareboot.toml` and `barefoc.toml` using `[board]`, `[memory]`,
+/// `[communication]`, `[bootloader]`, and optional `[gate_driver]`.
 pub fn parse_target_config(text: &str) -> Result<TargetConfig, String> {
     let val: toml::Value = toml::from_str(text).map_err(|e| e.to_string())?;
     let root = val.as_table().ok_or_else(|| "expected TOML table".to_string())?;
 
-    if let Some(bl_val) = root.get("bootloader").and_then(|v| v.as_table()) {
-        // barefoc.toml format with [bootloader], [mcu]/[board], [memory], [gate_driver]
-        let mcu_table = root.get("mcu").and_then(|v| v.as_table());
-        let board_table = root.get("board").and_then(|v| v.as_table());
-        let mem_table = root.get("memory").and_then(|v| v.as_table());
-        let gd_table = root.get("gate_driver").and_then(|v| v.as_table());
+    let board_table = root
+        .get("board")
+        .and_then(|v| v.as_table())
+        .ok_or_else(|| "missing [board] section".to_string())?;
+    let comm_table = root.get("communication").and_then(|v| v.as_table());
+    let bl_table = root.get("bootloader").and_then(|v| v.as_table());
+    let mem_table = root.get("memory").and_then(|v| v.as_table());
+    let gd_table = root.get("gate_driver").and_then(|v| v.as_table());
 
-        let target = bl_val
-            .get("target")
+    let board = TargetBoardConfig {
+        name: board_table
+            .get("name")
             .and_then(|v| v.as_str())
-            .or_else(|| mcu_table.and_then(|m| m.get("target").and_then(|v| v.as_str())))
-            .or_else(|| mcu_table.and_then(|m| m.get("family").and_then(|v| v.as_str())))
-            .or_else(|| board_table.and_then(|b| b.get("mcu").and_then(|v| v.as_str())))
-            .or_else(|| board_table.and_then(|b| b.get("target").and_then(|v| v.as_str())))
-            .or_else(|| board_table.and_then(|b| b.get("family").and_then(|v| v.as_str())))
-            .unwrap_or("generic")
-            .to_string();
-
-        let transport = bl_val
-            .get("transport")
+            .unwrap_or_default()
+            .to_string(),
+        mcu: board_table
+            .get("mcu")
             .and_then(|v| v.as_str())
-            .unwrap_or("can")
-            .to_string();
-
-        let boot_window_ms = bl_val
-            .get("boot_window_ms")
+            .unwrap_or_default()
+            .to_string(),
+        family: board_table
+            .get("family")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        system_clock_hz: board_table
+            .get("system_clock_hz")
             .and_then(parse_u32_val)
-            .unwrap_or(250);
+            .unwrap_or_else(default_system_clock),
+    };
 
-        let node_id = bl_val
-            .get("node_id")
-            .or_else(|| bl_val.get("can_node_id"))
-            .and_then(parse_u32_val);
-
-        let i2c_address = bl_val.get("i2c_address").and_then(parse_u8_val);
-        let uart_baud = bl_val.get("uart_baud").and_then(parse_u32_val);
-        let preserve_nvm = bl_val
-            .get("preserve_nvm")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        let initial_safe_pins = if let Some(explicit) = bl_val.get("initial_safe_pins") {
-            parse_safe_pins_val(explicit)
-        } else if let Some(gd) = gd_table {
-            derive_safe_pins_from_gate_driver(gd)
-        } else {
-            Vec::new()
-        };
-
-        let memory = if let Some(mem) = mem_table {
-            let app_base = mem
-                .get("app_base")
-                .or_else(|| mem.get("app_origin"))
-                .and_then(parse_u32_val);
-            let app_end = mem.get("app_end").and_then(parse_u32_val).or_else(|| {
-                let size = mem.get("app_size").and_then(parse_u32_val)?;
-                Some(app_base?.saturating_add(size))
-            });
-            TargetMemoryConfig {
-                flash_start: mem
-                    .get("flash_start")
-                    .or_else(|| mem.get("flash_origin"))
-                    .and_then(parse_u32_val),
-                flash_size: mem.get("flash_size").and_then(parse_u32_val),
-                bootloader_size: mem.get("bootloader_size").and_then(parse_u32_val),
-                app_base,
-                app_end,
-                nvm_base: mem
-                    .get("nvm_base")
-                    .or_else(|| mem.get("nvm_origin"))
-                    .and_then(parse_u32_val),
-                page_size: mem.get("page_size").and_then(parse_u32_val),
-            }
-        } else {
-            TargetMemoryConfig::default()
-        };
-
-        let cfg = TargetConfig {
-            target,
-            transport,
-            runtime_defaults: RuntimeDefaults {
-                boot_window_ms,
-                node_id,
-                i2c_address,
-                uart_baud,
-                preserve_nvm,
-                initial_safe_pins,
-            },
-            memory,
-        };
-        cfg.validate()?;
-        Ok(cfg)
+    let target = if !board.mcu.is_empty() {
+        board.mcu.clone()
+    } else if !board.family.is_empty() {
+        board.family.clone()
     } else {
-        // Standalone bareboot.toml format
-        let target = root
-            .get("target")
-            .and_then(|v| v.as_str())
-            .or_else(|| root.get("mcu").and_then(|v| v.as_str()))
-            .unwrap_or("stm32f103")
-            .to_string();
+        board.name.clone()
+    };
 
-        let transport = root
-            .get("transport")
-            .and_then(|v| v.as_str())
-            .unwrap_or("can")
-            .to_string();
+    let transports = comm_table
+        .and_then(|c| c.get("transports"))
+        .map(parse_string_list)
+        .unwrap_or_default();
+    let single_transport = comm_table
+        .and_then(|c| c.get("transport"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let transport = single_transport
+        .clone()
+        .or_else(|| transports.first().cloned())
+        .unwrap_or_else(|| "can".to_string());
 
-        let boot_window_ms = root
-            .get("boot_window_ms")
-            .and_then(parse_u32_val)
-            .unwrap_or(250);
-
-        let node_id = root
-            .get("node_id")
-            .or_else(|| root.get("can_node_id"))
-            .and_then(parse_u32_val);
-
-        let i2c_address = root.get("i2c_address").and_then(parse_u8_val);
-        let uart_baud = root.get("uart_baud").and_then(parse_u32_val);
-        let preserve_nvm = root
-            .get("preserve_nvm")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        let initial_safe_pins = root
-            .get("initial_safe_pins")
-            .map(parse_safe_pins_val)
-            .unwrap_or_default();
-
-        let memory = if let Some(mem) = root.get("memory").and_then(|v| v.as_table()) {
-            TargetMemoryConfig {
-                flash_start: mem.get("flash_start").and_then(parse_u32_val),
-                flash_size: mem.get("flash_size").and_then(parse_u32_val),
-                bootloader_size: mem.get("bootloader_size").and_then(parse_u32_val),
-                app_base: mem.get("app_base").and_then(parse_u32_val),
-                app_end: mem.get("app_end").and_then(parse_u32_val),
-                nvm_base: mem.get("nvm_base").and_then(parse_u32_val),
-                page_size: mem.get("page_size").and_then(parse_u32_val),
-            }
+    let communication = TargetCommunicationConfig {
+        transports: if transports.is_empty() {
+            vec![transport.clone()]
         } else {
-            TargetMemoryConfig {
-                flash_start: root.get("flash_start").and_then(parse_u32_val),
-                flash_size: root.get("flash_size").and_then(parse_u32_val),
-                bootloader_size: root.get("bootloader_size").and_then(parse_u32_val),
-                app_base: root.get("app_base").and_then(parse_u32_val),
-                app_end: root.get("app_end").and_then(parse_u32_val),
-                nvm_base: root.get("nvm_base").and_then(parse_u32_val),
-                page_size: root.get("page_size").and_then(parse_u32_val),
-            }
-        };
+            transports
+        },
+        transport: single_transport,
+        tx_scl_pin: comm_table
+            .and_then(|c| c.get("tx_scl_pin"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        rx_sda_pin: comm_table
+            .and_then(|c| c.get("rx_sda_pin"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        can_enable_pin: comm_table
+            .and_then(|c| c.get("can_enable_pin"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        bitrate: comm_table.and_then(|c| c.get("bitrate")).and_then(parse_u32_val),
+        address: comm_table.and_then(|c| c.get("address")).and_then(parse_u8_val),
+    };
 
-        let cfg = TargetConfig {
-            target,
-            transport,
-            runtime_defaults: RuntimeDefaults {
-                boot_window_ms,
-                node_id,
-                i2c_address,
-                uart_baud,
-                preserve_nvm,
-                initial_safe_pins,
-            },
-            memory,
-        };
-        cfg.validate()?;
-        Ok(cfg)
-    }
+    let boot_window_ms = bl_table
+        .and_then(|b| b.get("boot_window_ms"))
+        .and_then(parse_u32_val)
+        .unwrap_or_else(default_boot_window);
+    let preserve_nvm = bl_table
+        .and_then(|b| b.get("preserve_nvm"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(default_preserve_nvm);
+    let initial_safe_pins = if let Some(explicit) = bl_table.and_then(|b| b.get("initial_safe_pins")) {
+        parse_string_list(explicit)
+    } else if let Some(gd) = gd_table {
+        derive_safe_pins_from_gate_driver(gd)
+    } else {
+        Vec::new()
+    };
+
+    let bootloader = TargetBootloaderConfig {
+        enabled: bl_table
+            .and_then(|b| b.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        bootloader_type: bl_table
+            .and_then(|b| b.get("type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("bareboot")
+            .to_string(),
+        boot_window_ms,
+        preserve_nvm,
+        initial_safe_pins: initial_safe_pins.clone(),
+        mailbox_address: bl_table
+            .and_then(|b| b.get("mailbox_address"))
+            .and_then(parse_u32_val),
+        mailbox_magic: bl_table
+            .and_then(|b| b.get("mailbox_magic"))
+            .and_then(parse_u64_val),
+    };
+
+    let memory = if let Some(mem) = mem_table {
+        TargetMemoryConfig {
+            flash_origin: mem.get("flash_origin").and_then(parse_u32_val),
+            flash_size: mem.get("flash_size").and_then(parse_u32_val),
+            ram_origin: mem.get("ram_origin").and_then(parse_u32_val),
+            ram_size: mem.get("ram_size").and_then(parse_u32_val),
+            bootloader_origin: mem.get("bootloader_origin").and_then(parse_u32_val),
+            bootloader_size: mem.get("bootloader_size").and_then(parse_u32_val),
+            app_origin: mem.get("app_origin").and_then(parse_u32_val),
+            app_size: mem.get("app_size").and_then(parse_u32_val),
+            nvm_origin: mem.get("nvm_origin").and_then(parse_u32_val),
+            nvm_size: mem.get("nvm_size").and_then(parse_u32_val),
+            page_size: mem.get("page_size").and_then(parse_u32_val),
+        }
+    } else {
+        TargetMemoryConfig::default()
+    };
+
+    let cfg = TargetConfig {
+        target,
+        transport,
+        board,
+        communication: communication.clone(),
+        bootloader: bootloader.clone(),
+        runtime_defaults: RuntimeDefaults {
+            boot_window_ms,
+            address: communication.address,
+            bitrate: communication.bitrate,
+            preserve_nvm,
+            initial_safe_pins,
+            mailbox_address: bootloader.mailbox_address,
+            mailbox_magic: bootloader.mailbox_magic,
+        },
+        memory,
+    };
+    cfg.validate()?;
+    Ok(cfg)
 }
 
 fn resolve_config_file(path: &Path) -> Option<PathBuf> {
@@ -398,7 +500,7 @@ fn resolve_config_file(path: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Load TargetConfig supporting both bareboot.toml and barefoc.toml files or directories.
+/// Load TargetConfig supporting both `bareboot.toml` and `barefoc.toml` files or directories.
 pub fn load_target_config(path: &Path) -> Result<TargetConfig, String> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -406,6 +508,9 @@ pub fn load_target_config(path: &Path) -> Result<TargetConfig, String> {
         Ok(TargetConfig {
             target: "stm32f103".to_string(),
             transport: "can".to_string(),
+            board: TargetBoardConfig::default(),
+            communication: TargetCommunicationConfig::default(),
+            bootloader: TargetBootloaderConfig::default(),
             runtime_defaults: RuntimeDefaults::default(),
             memory: TargetMemoryConfig::default(),
         })
@@ -417,6 +522,9 @@ pub fn load_target_config(path: &Path) -> Result<TargetConfig, String> {
             return Ok(TargetConfig {
                 target: "stm32f103".to_string(),
                 transport: "can".to_string(),
+                board: TargetBoardConfig::default(),
+                communication: TargetCommunicationConfig::default(),
+                bootloader: TargetBootloaderConfig::default(),
                 runtime_defaults: RuntimeDefaults::default(),
                 memory: TargetMemoryConfig::default(),
             });
@@ -440,7 +548,13 @@ pub fn save_target_config(path: &Path, config: &TargetConfig) -> Result<(), Stri
         } else {
             path.to_path_buf()
         };
-        let text = toml::to_string_pretty(config).map_err(|e| e.to_string())?;
+        let unified = UnifiedTomlFile {
+            board: &config.board,
+            memory: &config.memory,
+            communication: &config.communication,
+            bootloader: &config.bootloader,
+        };
+        let text = toml::to_string_pretty(&unified).map_err(|e| e.to_string())?;
         if let Some(parent) = target_file.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -475,7 +589,7 @@ pub fn save_config(path: &Path, config: &BarebootConfig) -> Result<(), String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let text = format!(
-            "target = \"{}\"\ntransport = \"{}\"\nboot_window_ms = {}\n",
+            "[board]\nmcu = \"{}\"\n\n[communication]\ntransports = [\"{}\"]\n\n[bootloader]\nboot_window_ms = {}\n",
             config.target, config.transport, config.boot_window_ms
         );
         if let Some(parent) = path.parent() {
@@ -516,49 +630,55 @@ mod tests {
     }
 
     #[test]
-    fn parse_barefoc_toml_sections() {
+    fn parse_unified_bareboot_toml_sections() {
         let toml_str = r#"
-[mcu]
-target = "stm32h503kbu6"
-flash_size = 131072
-ram_size = 32768
+[board]
+name = "custom-h503"
+mcu = "stm32h503kbu6"
+family = "stm32h5"
+system_clock_hz = 250000000
 
 [memory]
-flash_start = "0x08000000"
-flash_size = "0x20000"
-bootloader_size = "0x2000"
-app_base = "0x08002000"
-app_end = "0x0801E000"
-nvm_base = "0x0801E000"
-page_size = 2048
+flash_origin = 0x08000000
+flash_size = 131072
+bootloader_origin = 0x08000000
+bootloader_size = 8192
+app_origin = 0x08002000
+app_size = 114688
+nvm_origin = 0x0801E000
+nvm_size = 8192
+page_size = 8192
+
+[communication]
+transports = ["i2c", "i3c"]
+address = 0x30
+bitrate = 1000000
 
 [bootloader]
-target = "stm32h503"
-transport = "i2c"
+enabled = true
+type = "bareboot"
 boot_window_ms = 300
-node_id = "0x30"
-i2c_address = "0x30"
-uart_baud = 250000
 preserve_nvm = true
 initial_safe_pins = ["!PB15", "!PB1", "!PB0", "!PA7"]
+mailbox_address = 0x20007FE0
+mailbox_magic = 0x5984E3FA6CA1589B
 "#;
 
         let cfg = parse_target_config(toml_str).unwrap();
-        assert_eq!(cfg.target, "stm32h503");
+        assert_eq!(cfg.target, "stm32h503kbu6");
         assert_eq!(cfg.transport, "i2c");
         assert_eq!(cfg.runtime_defaults.boot_window_ms, 300);
-        assert_eq!(cfg.runtime_defaults.node_id, Some(0x30));
-        assert_eq!(cfg.runtime_defaults.i2c_address, Some(0x30));
-        assert_eq!(cfg.runtime_defaults.uart_baud, Some(250000));
+        assert_eq!(cfg.runtime_defaults.address, Some(0x30));
+        assert_eq!(cfg.runtime_defaults.bitrate, Some(1_000_000));
         assert!(cfg.runtime_defaults.preserve_nvm);
         assert_eq!(
             cfg.runtime_defaults.initial_safe_pins,
             vec!["!PB15", "!PB1", "!PB0", "!PA7"]
         );
-
-        assert_eq!(cfg.memory.app_base, Some(0x08002000));
-        assert_eq!(cfg.memory.app_end, Some(0x0801E000));
-        assert_eq!(cfg.memory.page_size, Some(2048));
+        assert_eq!(cfg.memory.flash_origin, Some(0x08000000));
+        assert_eq!(cfg.memory.app_origin, Some(0x08002000));
+        assert_eq!(cfg.memory.app_size, Some(114688));
+        assert_eq!(cfg.memory.page_size, Some(8192));
     }
 
     #[test]
@@ -568,6 +688,7 @@ initial_safe_pins = ["!PB15", "!PB1", "!PB0", "!PA7"]
 name = "fishyservo-stm32h5"
 mcu = "stm32h503kbu6"
 family = "stm32h5"
+system_clock_hz = 250000000
 
 [memory]
 flash_origin = 0x08000000
@@ -577,10 +698,15 @@ app_origin = 0x08002000
 app_size = 106496
 nvm_origin = 0x0801C000
 
+[communication]
+transports = ["i3c", "i2c"]
+address = 0x40
+bitrate = 1000000
+
 [bootloader]
-transport = "i2c"
+enabled = true
+type = "bareboot"
 boot_window_ms = 250
-i2c_address = 0x40
 
 [gate_driver]
 driver_type = "drv8411a"
@@ -596,43 +722,16 @@ fault_pin = "^!PB12"
 "#;
         let cfg = parse_target_config(toml_str).unwrap();
         assert_eq!(cfg.target, "stm32h503kbu6");
-        assert_eq!(cfg.memory.flash_start, Some(0x0800_0000));
-        assert_eq!(cfg.memory.app_base, Some(0x0800_2000));
-        assert_eq!(cfg.memory.app_end, Some(0x0800_2000 + 106_496));
-        assert_eq!(cfg.memory.nvm_base, Some(0x0801_C000));
+        assert_eq!(cfg.transport, "i3c");
+        assert_eq!(cfg.memory.flash_origin, Some(0x0800_0000));
+        assert_eq!(cfg.memory.app_origin, Some(0x0800_2000));
+        assert_eq!(cfg.memory.app_size, Some(106_496));
+        assert_eq!(cfg.memory.nvm_origin, Some(0x0801_C000));
         assert_eq!(
             cfg.runtime_defaults.initial_safe_pins,
             vec![
                 "!PA9", "PB1", "!PB5", "!PB15", "!PA7", "!PA15", "!PA8", "!PA6", "^PB12"
             ]
-        );
-    }
-
-    #[test]
-    fn parse_standalone_bareboot_toml() {
-        let toml_str = r#"
-target = "ch32v203"
-transport = "usb"
-boot_window_ms = 200
-node_id = 0x100
-preserve_nvm = true
-app_base = 0x08002000
-app_end = 0x08010000
-initial_safe_pins = [
-    "!PB15",
-    "PA7",
-    "^PB12",
-]
-"#;
-        let cfg = parse_target_config(toml_str).unwrap();
-        assert_eq!(cfg.target, "ch32v203");
-        assert_eq!(cfg.transport, "usb");
-        assert_eq!(cfg.runtime_defaults.boot_window_ms, 200);
-        assert_eq!(cfg.runtime_defaults.node_id, Some(0x100));
-        assert!(cfg.runtime_defaults.preserve_nvm);
-        assert_eq!(
-            cfg.runtime_defaults.initial_safe_pins,
-            vec!["!PB15", "PA7", "^PB12"]
         );
     }
 
@@ -644,12 +743,14 @@ initial_safe_pins = [
 
         let foc_file = dir.join("barefoc.toml");
         let text = r#"
-[mcu]
-target = "stm32h503"
+[board]
+mcu = "stm32h503"
+family = "stm32h5"
+
+[communication]
+transports = ["multi"]
 
 [bootloader]
-target = "stm32h503"
-transport = "multi"
 boot_window_ms = 250
 "#;
         fs::write(&foc_file, text).unwrap();

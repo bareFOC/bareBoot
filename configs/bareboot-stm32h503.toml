@@ -1,9 +1,24 @@
-target = "stm32h503"
+[board]
+name = "stm32h503-generic"
 mcu = "stm32h503kb"
+family = "stm32h5"
 system_clock_hz = 64000000
+
+[memory]
+flash_origin = 0x08000000
 flash_size = 131072
+ram_origin = 0x20000000
 ram_size = 32768
-app_base = 0x08004000
-boot_window_ms = 3000
+bootloader_origin = 0x08000000
+bootloader_size = 16384
+app_origin = 0x08004000
+
+[communication]
 transports = ["i2c"]
-i2c_target_address = 0x40
+address = 0x40
+
+[bootloader]
+enabled = true
+type = "bareboot"
+boot_window_ms = 3000
+preserve_nvm = true

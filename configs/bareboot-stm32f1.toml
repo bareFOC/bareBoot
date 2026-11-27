@@ -1,9 +1,24 @@
-target = "stm32f103"
+[board]
+name = "stm32f103-generic"
 mcu = "stm32f103c8"
+family = "stm32f1"
 system_clock_hz = 8000000
+
+[memory]
+flash_origin = 0x08000000
 flash_size = 65536
+ram_origin = 0x20000000
 ram_size = 20480
-app_base = 0x08002000
-boot_window_ms = 3000
+bootloader_origin = 0x08000000
+bootloader_size = 8192
+app_origin = 0x08002000
+
+[communication]
 transports = ["i2c"]
-i2c_target_address = 0x40
+address = 0x40
+
+[bootloader]
+enabled = true
+type = "bareboot"
+boot_window_ms = 3000
+preserve_nvm = true
