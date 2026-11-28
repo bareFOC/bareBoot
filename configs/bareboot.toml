@@ -13,9 +13,20 @@ bootloader_origin = 0x08000000
 bootloader_size = 8192
 app_origin = 0x08002000
 
-[communication]
-transports = ["can", "i2c"]
+[communication.can0]
+protocol = "can"
+role = "target"
+bootloader = true
+tx_scl_pin = "PB9"
+rx_sda_pin = "PB8"
 bitrate = 1000000
+
+[communication.i2c0]
+protocol = "i2c"
+role = "target"
+bootloader = true
+tx_scl_pin = "PB6"
+rx_sda_pin = "PB7"
 address = 0x40
 
 [bootloader]

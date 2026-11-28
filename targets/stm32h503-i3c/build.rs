@@ -80,6 +80,37 @@ fn parse_status_led_pin(spec: &str) -> Option<(char, u8, bool)> {
     Some((port, pin, active_low))
 }
 
+fn count_bootloader_ports_from_toml(toml_text: &str) -> usize {
+    let mut in_comm_port = false;
+    let mut is_bootloader = false;
+    let mut count = 0usize;
+    for raw_line in toml_text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            if in_comm_port && is_bootloader {
+                count += 1;
+            }
+            in_comm_port = line.starts_with("[communication.") && !line.starts_with("[[");
+            is_bootloader = false;
+            continue;
+        }
+        if in_comm_port {
+            if let Some((k, v)) = line.split_once('=') {
+                if k.trim() == "bootloader" && v.trim() == "true" {
+                    is_bootloader = true;
+                }
+            }
+        }
+    }
+    if in_comm_port && is_bootloader {
+        count += 1;
+    }
+    count
+}
+
 fn extract_status_led_from_toml(toml_text: &str) -> Option<String> {
     let mut in_bootloader = false;
     for raw_line in toml_text.lines() {
@@ -148,14 +179,26 @@ fn main() {
     let config_path = env::var("BAREBOOT_CONFIG")
         .ok()
         .or_else(|| env::var("BAREFOC_BOARD").ok());
-    let status_led_spec: Option<String> = if let Some(ref path) = config_path {
+    let (status_led_spec, bl_port_count): (Option<String>, usize) = if let Some(ref path) = config_path {
         println!("cargo:rerun-if-changed={path}");
         let text = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("Failed to read config {path}: {e}"));
-        extract_status_led_from_toml(&text)
+        (
+            extract_status_led_from_toml(&text),
+            count_bootloader_ports_from_toml(&text),
+        )
     } else {
-        Some("!PA1".to_string())
+        (Some("!PA1".to_string()), 1)
     };
+
+    let use_multi_arbiter = bl_port_count >= 2;
+    let transport_rs = format!(
+        "#[allow(dead_code)]\npub const BOOTLOADER_PORT_COUNT: usize = {bl_port_count};\n#[allow(dead_code)]\npub const USE_MULTI_TRANSPORT_ARBITER: bool = {use_multi_arbiter};\n"
+    );
+    File::create(out.join("transport_arbiter_generated.rs"))
+        .unwrap()
+        .write_all(transport_rs.as_bytes())
+        .unwrap();
 
     let status_led_rs = match status_led_spec.as_deref().map(str::trim) {
         Some("") | None => {

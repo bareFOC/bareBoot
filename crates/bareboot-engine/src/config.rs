@@ -1,4 +1,5 @@
 use bareboot_client::BarebootConfig;
+use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -108,23 +109,119 @@ impl Default for TargetBoardConfig {
     }
 }
 
-/// Unified `[communication]` section matching `barefoc.toml` and `bareboot.toml`.
+fn default_role_target() -> String {
+    "target".to_string()
+}
+
+/// Semantic `[communication.<name>]` port configuration matching `barefoc.toml` and `bareboot.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TargetCommunicationConfig {
+pub struct TargetCommunicationPortConfig {
+    pub protocol: String,
+    #[serde(default = "default_role_target")]
+    pub role: String,
     #[serde(default)]
-    pub transports: Vec<String>,
-    #[serde(default)]
-    pub transport: Option<String>,
-    #[serde(default)]
-    pub tx_scl_pin: Option<String>,
-    #[serde(default)]
-    pub rx_sda_pin: Option<String>,
-    #[serde(default)]
-    pub can_enable_pin: Option<String>,
-    #[serde(default)]
+    pub bootloader: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitrate: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peripheral: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mux: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mux_address: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_scl_pin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx_sda_pin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sck_pin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub miso_pin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mosi_pin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_enable_pin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<u8>,
+}
+
+impl TargetCommunicationPortConfig {
+    pub fn pins(&self) -> Vec<(&'static str, &str)> {
+        let mut out = Vec::new();
+        if let Some(p) = self.tx_scl_pin.as_deref() {
+            out.push(("tx_scl_pin", p));
+        }
+        if let Some(p) = self.rx_sda_pin.as_deref() {
+            out.push(("rx_sda_pin", p));
+        }
+        if let Some(p) = self.sck_pin.as_deref() {
+            out.push(("sck_pin", p));
+        }
+        if let Some(p) = self.miso_pin.as_deref() {
+            out.push(("miso_pin", p));
+        }
+        if let Some(p) = self.mosi_pin.as_deref() {
+            out.push(("mosi_pin", p));
+        }
+        if let Some(p) = self.can_enable_pin.as_deref() {
+            out.push(("can_enable_pin", p));
+        }
+        out
+    }
+
+    pub fn validate(&self, port_name: &str) -> Result<(), String> {
+        let proto = self.protocol.to_ascii_lowercase();
+        match proto.as_str() {
+            "i3c" | "i2c" | "spi" | "can" | "fdcan" | "uart" | "usb" | "rtt" | "multi" => {}
+            other => {
+                return Err(format!(
+                    "[communication.{port_name}]: unsupported protocol '{other}'"
+                ));
+            }
+        }
+        let role = self.role.to_ascii_lowercase();
+        match role.as_str() {
+            "target" | "master" | "both" => {}
+            other => {
+                return Err(format!(
+                    "[communication.{port_name}]: invalid role '{other}' (expected target, master, or both)"
+                ));
+            }
+        }
+        if self.bootloader && role == "master" {
+            return Err(format!(
+                "[communication.{port_name}]: bootloader = true is only valid when role is 'target' or 'both'"
+            ));
+        }
+        if matches!(proto.as_str(), "uart" | "can" | "fdcan") && self.bitrate.is_none() {
+            return Err(format!(
+                "[communication.{port_name}]: bitrate is required for async protocol '{proto}'"
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_communication_ports(
+    ports: &BTreeMap<String, TargetCommunicationPortConfig>,
+) -> Result<(), String> {
+    let mut claimed: BTreeMap<String, String> = BTreeMap::new();
+    for (port_name, port) in ports {
+        port.validate(port_name)?;
+        for (field_name, raw_pin) in port.pins() {
+            let (_, _, _, base) = strip_klipper_modifiers(raw_pin);
+            let pin = base.to_ascii_uppercase();
+            if pin.is_empty() {
+                continue;
+            }
+            if let Some(prev_port) = claimed.insert(pin.clone(), port_name.clone()) {
+                return Err(format!(
+                    "Pin conflict: GPIO pin {pin} ({field_name}) in [communication.{port_name}] is already claimed by [communication.{prev_port}]"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Unified `[bootloader]` section matching `barefoc.toml` and `bareboot.toml`.
@@ -170,7 +267,7 @@ pub struct TargetConfig {
     #[serde(default)]
     pub board: TargetBoardConfig,
     #[serde(default)]
-    pub communication: TargetCommunicationConfig,
+    pub communication: BTreeMap<String, TargetCommunicationPortConfig>,
     #[serde(default)]
     pub bootloader: TargetBootloaderConfig,
     #[serde(default)]
@@ -180,17 +277,32 @@ pub struct TargetConfig {
 }
 
 impl TargetConfig {
+    /// Returns all `[communication.<name>]` ports marked `bootloader = true`.
+    pub fn bootloader_ports(&self) -> Vec<(&str, &TargetCommunicationPortConfig)> {
+        self.communication
+            .iter()
+            .filter(|(_, p)| p.bootloader)
+            .map(|(k, v)| (k.as_str(), v))
+            .collect()
+    }
+
+    /// Returns `true` when 2+ distinct-pin `bootloader = true` ports require `MultiTransportArbiter`.
+    pub fn uses_multi_transport_arbiter(&self) -> bool {
+        self.bootloader_ports().len() >= 2
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.target.trim().is_empty() {
             return Err("target must not be empty".to_string());
         }
         match self.transport.as_str() {
-            "can" | "i2c" | "i3c" | "uart" | "usb" | "multi" => {}
+            "can" | "fdcan" | "i2c" | "i3c" | "uart" | "usb" | "multi" => {}
             other => return Err(format!("unsupported transport: {other}")),
         }
         if self.runtime_defaults.boot_window_ms < 50 {
             return Err("boot_window_ms must be at least 50".to_string());
         }
+        validate_communication_ports(&self.communication)?;
         Ok(())
     }
 
@@ -207,7 +319,7 @@ impl TargetConfig {
 struct UnifiedTomlFile<'a> {
     board: &'a TargetBoardConfig,
     memory: &'a TargetMemoryConfig,
-    communication: &'a TargetCommunicationConfig,
+    communication: &'a BTreeMap<String, TargetCommunicationPortConfig>,
     bootloader: &'a TargetBootloaderConfig,
 }
 
@@ -374,41 +486,93 @@ pub fn parse_target_config(text: &str) -> Result<TargetConfig, String> {
         board.name.clone()
     };
 
-    let transports = comm_table
-        .and_then(|c| c.get("transports"))
-        .map(parse_string_list)
-        .unwrap_or_default();
-    let single_transport = comm_table
-        .and_then(|c| c.get("transport"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let transport = single_transport
-        .clone()
-        .or_else(|| transports.first().cloned())
-        .unwrap_or_else(|| "can".to_string());
+    let mut communication: BTreeMap<String, TargetCommunicationPortConfig> = BTreeMap::new();
+    if let Some(comm) = comm_table {
+        for (port_name, port_val) in comm {
+            let port_tbl = port_val.as_table().ok_or_else(|| {
+                format!("[communication.{port_name}] must be a TOML table")
+            })?;
+            let protocol = port_tbl
+                .get("protocol")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("[communication.{port_name}]: missing 'protocol'"))?
+                .to_string();
+            let role = port_tbl
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("target")
+                .to_string();
+            let bootloader = port_tbl
+                .get("bootloader")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let port = TargetCommunicationPortConfig {
+                protocol,
+                role,
+                bootloader,
+                bitrate: port_tbl.get("bitrate").and_then(parse_u32_val),
+                peripheral: port_tbl
+                    .get("peripheral")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                mux: port_tbl
+                    .get("mux")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                mux_address: port_tbl.get("mux_address").and_then(parse_u8_val),
+                tx_scl_pin: port_tbl
+                    .get("tx_scl_pin")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                rx_sda_pin: port_tbl
+                    .get("rx_sda_pin")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                sck_pin: port_tbl
+                    .get("sck_pin")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                miso_pin: port_tbl
+                    .get("miso_pin")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                mosi_pin: port_tbl
+                    .get("mosi_pin")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                can_enable_pin: port_tbl
+                    .get("can_enable_pin")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                address: port_tbl.get("address").and_then(parse_u8_val),
+            };
+            communication.insert(port_name.clone(), port);
+        }
+    }
 
-    let communication = TargetCommunicationConfig {
-        transports: if transports.is_empty() {
-            vec![transport.clone()]
-        } else {
-            transports
-        },
-        transport: single_transport,
-        tx_scl_pin: comm_table
-            .and_then(|c| c.get("tx_scl_pin"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        rx_sda_pin: comm_table
-            .and_then(|c| c.get("rx_sda_pin"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        can_enable_pin: comm_table
-            .and_then(|c| c.get("can_enable_pin"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        bitrate: comm_table.and_then(|c| c.get("bitrate")).and_then(parse_u32_val),
-        address: comm_table.and_then(|c| c.get("address")).and_then(parse_u8_val),
+    let bl_ports: Vec<&TargetCommunicationPortConfig> =
+        communication.values().filter(|p| p.bootloader).collect();
+    let (transport, primary_port) = if bl_ports.len() >= 2 {
+        ("multi".to_string(), bl_ports.first().copied())
+    } else if let Some(p) = bl_ports.first().copied() {
+        (p.protocol.to_ascii_lowercase(), Some(p))
+    } else {
+        let host_p = communication
+            .get("host")
+            .or_else(|| {
+                communication.values().find(|p| {
+                    let r = p.role.to_ascii_lowercase();
+                    r == "target" || r == "both"
+                })
+            })
+            .or_else(|| communication.values().next());
+        let tr = host_p
+            .map(|p| p.protocol.to_ascii_lowercase())
+            .unwrap_or_else(|| "can".to_string());
+        (tr, host_p)
     };
+    let primary_address = primary_port.and_then(|p| p.address);
+    let primary_bitrate = primary_port.and_then(|p| p.bitrate);
 
     let boot_window_ms = bl_table
         .and_then(|b| b.get("boot_window_ms"))
@@ -477,8 +641,8 @@ pub fn parse_target_config(text: &str) -> Result<TargetConfig, String> {
         bootloader: bootloader.clone(),
         runtime_defaults: RuntimeDefaults {
             boot_window_ms,
-            address: communication.address,
-            bitrate: communication.bitrate,
+            address: primary_address,
+            bitrate: primary_bitrate,
             preserve_nvm,
             initial_safe_pins,
             mailbox_address: bootloader.mailbox_address,
@@ -516,7 +680,7 @@ pub fn load_target_config(path: &Path) -> Result<TargetConfig, String> {
             target: "stm32f103".to_string(),
             transport: "can".to_string(),
             board: TargetBoardConfig::default(),
-            communication: TargetCommunicationConfig::default(),
+            communication: BTreeMap::new(),
             bootloader: TargetBootloaderConfig::default(),
             runtime_defaults: RuntimeDefaults::default(),
             memory: TargetMemoryConfig::default(),
@@ -530,7 +694,7 @@ pub fn load_target_config(path: &Path) -> Result<TargetConfig, String> {
                 target: "stm32f103".to_string(),
                 transport: "can".to_string(),
                 board: TargetBoardConfig::default(),
-                communication: TargetCommunicationConfig::default(),
+                communication: BTreeMap::new(),
                 bootloader: TargetBootloaderConfig::default(),
                 runtime_defaults: RuntimeDefaults::default(),
                 memory: TargetMemoryConfig::default(),
@@ -595,8 +759,13 @@ pub fn save_config(path: &Path, config: &BarebootConfig) -> Result<(), String> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let bitrate_line = if matches!(config.transport.as_str(), "uart" | "can" | "fdcan") {
+            "bitrate = 250000\n"
+        } else {
+            ""
+        };
         let text = format!(
-            "[board]\nmcu = \"{}\"\n\n[communication]\ntransports = [\"{}\"]\n\n[bootloader]\nboot_window_ms = {}\n",
+            "[board]\nmcu = \"{}\"\n\n[communication.host]\nprotocol = \"{}\"\nrole = \"target\"\nbootloader = true\n{bitrate_line}\n[bootloader]\nboot_window_ms = {}\n",
             config.target, config.transport, config.boot_window_ms
         );
         if let Some(parent) = path.parent() {
@@ -656,8 +825,10 @@ nvm_origin = 0x0801E000
 nvm_size = 8192
 page_size = 8192
 
-[communication]
-transports = ["i2c", "i3c"]
+[communication.host]
+protocol = "i2c"
+role = "target"
+bootloader = true
 address = 0x30
 bitrate = 1000000
 
@@ -705,8 +876,10 @@ app_origin = 0x08002000
 app_size = 106496
 nvm_origin = 0x0801C000
 
-[communication]
-transports = ["i3c", "i2c"]
+[communication.host]
+protocol = "i3c"
+role = "target"
+bootloader = true
 address = 0x40
 bitrate = 1000000
 
@@ -754,8 +927,10 @@ fault_pin = "^!PB12"
 mcu = "stm32h503"
 family = "stm32h5"
 
-[communication]
-transports = ["multi"]
+[communication.host]
+protocol = "multi"
+role = "target"
+bootloader = true
 
 [bootloader]
 boot_window_ms = 250
@@ -777,8 +952,10 @@ boot_window_ms = 250
 mcu = "stm32h503kbu6"
 family = "stm32h5"
 
-[communication]
-transports = ["i3c"]
+[communication.host]
+protocol = "i3c"
+role = "target"
+bootloader = true
 
 [bootloader]
 boot_window_ms = 250
@@ -786,5 +963,58 @@ status_led = "!PA1"
 "#;
         let cfg = parse_target_config(toml_str).unwrap();
         assert_eq!(cfg.bootloader.status_led.as_deref(), Some("!PA1"));
+    }
+
+    #[test]
+    fn rejects_pin_conflict_and_selects_multi_transport_arbiter() {
+        let conflict_toml = r#"
+[board]
+mcu = "stm32h503kbu6"
+family = "stm32h5"
+
+[communication.uart0]
+protocol = "uart"
+role = "target"
+bootloader = true
+tx_scl_pin = "PB6"
+rx_sda_pin = "PB7"
+bitrate = 250000
+
+[communication.i2c0]
+protocol = "i2c"
+role = "target"
+bootloader = true
+tx_scl_pin = "PB6"
+rx_sda_pin = "PB7"
+address = 0x30
+"#;
+        let err = parse_target_config(conflict_toml).unwrap_err();
+        assert!(err.contains("Pin conflict"), "got: {err}");
+
+        let multi_toml = r#"
+[board]
+mcu = "stm32h503kbu6"
+family = "stm32h5"
+
+[communication.can0]
+protocol = "can"
+role = "target"
+bootloader = true
+tx_scl_pin = "PB9"
+rx_sda_pin = "PB8"
+bitrate = 1000000
+
+[communication.uart0]
+protocol = "uart"
+role = "target"
+bootloader = true
+tx_scl_pin = "PA2"
+rx_sda_pin = "PA3"
+bitrate = 250000
+"#;
+        let cfg = parse_target_config(multi_toml).unwrap();
+        assert_eq!(cfg.transport, "multi");
+        assert!(cfg.uses_multi_transport_arbiter());
+        assert_eq!(cfg.bootloader_ports().len(), 2);
     }
 }

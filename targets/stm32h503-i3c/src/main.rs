@@ -13,6 +13,7 @@ use cortex_m_rt::entry;
 
 include!(concat!(env!("OUT_DIR"), "/safe_pins_generated.rs"));
 include!(concat!(env!("OUT_DIR"), "/status_led_generated.rs"));
+include!(concat!(env!("OUT_DIR"), "/transport_arbiter_generated.rs"));
 
 const APP_BASE: u32 = 0x0800_4000;
 const APP_END: u32 = 0x0801_A000; // Sectors 2..12 (88 KiB)

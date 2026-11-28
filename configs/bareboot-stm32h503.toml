@@ -13,8 +13,13 @@ bootloader_origin = 0x08000000
 bootloader_size = 16384
 app_origin = 0x08004000
 
-[communication]
-transports = ["i2c"]
+[communication.host]
+protocol = "i2c"
+role = "target"
+bootloader = true
+peripheral = "I2C1"
+tx_scl_pin = "PB6"
+rx_sda_pin = "PB7"
 address = 0x40
 
 [bootloader]
