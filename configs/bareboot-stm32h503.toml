@@ -22,3 +22,4 @@ enabled = true
 type = "bareboot"
 boot_window_ms = 3000
 preserve_nvm = true
+status_led = "!PA1"

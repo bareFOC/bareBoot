@@ -51,6 +51,67 @@ fn parse_klipper_pin(spec: &str) -> Option<(char, u8, &'static str)> {
     Some((port, pin, mode))
 }
 
+fn parse_status_led_pin(spec: &str) -> Option<(char, u8, bool)> {
+    let mut rest = spec.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let mut active_low = false;
+    if let Some(stripped) = rest.strip_prefix('!') {
+        active_low = true;
+        rest = stripped.trim();
+    }
+    let bytes = rest.as_bytes();
+    if bytes.len() < 2 {
+        return None;
+    }
+    let (port, num_start) = if bytes[0] == b'P' || bytes[0] == b'p' {
+        ((bytes[1] as char).to_ascii_uppercase(), 2)
+    } else {
+        ((bytes[0] as char).to_ascii_uppercase(), 1)
+    };
+    if !('A'..='H').contains(&port) {
+        return None;
+    }
+    let pin: u8 = rest[num_start..].parse().ok()?;
+    if pin > 15 {
+        return None;
+    }
+    Some((port, pin, active_low))
+}
+
+fn extract_status_led_from_toml(toml_text: &str) -> Option<String> {
+    let mut in_bootloader = false;
+    for raw_line in toml_text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_bootloader = line == "[bootloader]"
+                || line.starts_with("[bootloader]")
+                    && line["[bootloader]".len()..].trim_start().starts_with('#');
+            continue;
+        }
+        if !in_bootloader {
+            continue;
+        }
+        if let Some((key, val)) = line.split_once('=') {
+            if key.trim() == "status_led" {
+                let val = val.trim();
+                let quote = val.chars().next()?;
+                if quote == '"' || quote == '\'' {
+                    let rest = &val[1..];
+                    if let Some(end) = rest.find(quote) {
+                        return Some(rest[..end].to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn main() {
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
     File::create(out.join("memory.x"))
@@ -84,7 +145,38 @@ fn main() {
         .write_all(generated.as_bytes())
         .unwrap();
 
+    let config_path = env::var("BAREBOOT_CONFIG")
+        .ok()
+        .or_else(|| env::var("BAREFOC_BOARD").ok());
+    let status_led_spec: Option<String> = if let Some(ref path) = config_path {
+        println!("cargo:rerun-if-changed={path}");
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("Failed to read config {path}: {e}"));
+        extract_status_led_from_toml(&text)
+    } else {
+        Some("!PA1".to_string())
+    };
+
+    let status_led_rs = match status_led_spec.as_deref().map(str::trim) {
+        Some("") | None => {
+            "pub const STATUS_LED_CONFIG: Option<(char, u8, bool)> = None;\n".to_string()
+        }
+        Some(spec) => {
+            let (port, pin, active_low) = parse_status_led_pin(spec)
+                .unwrap_or_else(|| panic!("Invalid [bootloader].status_led pin: {spec}"));
+            format!(
+                "pub const STATUS_LED_CONFIG: Option<(char, u8, bool)> = Some(('{port}', {pin}, {active_low}));\n"
+            )
+        }
+    };
+    File::create(out.join("status_led_generated.rs"))
+        .unwrap()
+        .write_all(status_led_rs.as_bytes())
+        .unwrap();
+
     println!("cargo:rustc-link-search={}", out.display());
     println!("cargo:rerun-if-changed=memory.x");
     println!("cargo:rerun-if-env-changed=BAREBOOT_SAFE_PINS");
+    println!("cargo:rerun-if-env-changed=BAREBOOT_CONFIG");
+    println!("cargo:rerun-if-env-changed=BAREFOC_BOARD");
 }

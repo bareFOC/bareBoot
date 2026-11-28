@@ -141,6 +141,8 @@ pub struct TargetBootloaderConfig {
     #[serde(default)]
     pub initial_safe_pins: Vec<String>,
     #[serde(default)]
+    pub status_led: Option<String>,
+    #[serde(default)]
     pub mailbox_address: Option<u32>,
     #[serde(default)]
     pub mailbox_magic: Option<u64>,
@@ -154,6 +156,7 @@ impl Default for TargetBootloaderConfig {
             boot_window_ms: default_boot_window(),
             preserve_nvm: default_preserve_nvm(),
             initial_safe_pins: Vec::new(),
+            status_led: None,
             mailbox_address: None,
             mailbox_magic: None,
         }
@@ -436,6 +439,10 @@ pub fn parse_target_config(text: &str) -> Result<TargetConfig, String> {
         boot_window_ms,
         preserve_nvm,
         initial_safe_pins: initial_safe_pins.clone(),
+        status_led: bl_table
+            .and_then(|b| b.get("status_led"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         mailbox_address: bl_table
             .and_then(|b| b.get("mailbox_address"))
             .and_then(parse_u32_val),
@@ -758,7 +765,26 @@ boot_window_ms = 250
         let cfg = load_target_config(&dir).unwrap();
         assert_eq!(cfg.target, "stm32h503");
         assert_eq!(cfg.transport, "multi");
+        assert_eq!(cfg.bootloader.status_led, None);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_bootloader_status_led() {
+        let toml_str = r#"
+[board]
+mcu = "stm32h503kbu6"
+family = "stm32h5"
+
+[communication]
+transports = ["i3c"]
+
+[bootloader]
+boot_window_ms = 250
+status_led = "!PA1"
+"#;
+        let cfg = parse_target_config(toml_str).unwrap();
+        assert_eq!(cfg.bootloader.status_led.as_deref(), Some("!PA1"));
     }
 }

@@ -12,6 +12,7 @@ use core::ptr::{read_volatile, write_volatile};
 use cortex_m_rt::entry;
 
 include!(concat!(env!("OUT_DIR"), "/safe_pins_generated.rs"));
+include!(concat!(env!("OUT_DIR"), "/status_led_generated.rs"));
 
 const APP_BASE: u32 = 0x0800_4000;
 const APP_END: u32 = 0x0801_A000; // Sectors 2..12 (88 KiB)
@@ -50,8 +51,6 @@ const RSR_WWDGRSTF: u32 = 1 << 30;
 
 // GPIOA / GPIOB (Non-Secure)
 const GPIOA_BASE: u32 = 0x4202_0000;
-const GPIOA_MODER: *mut u32 = GPIOA_BASE as *mut u32;
-const GPIOA_BSRR: *mut u32 = (GPIOA_BASE + 0x18) as *mut u32;
 
 const GPIOB_BASE: u32 = 0x4202_0400;
 const GPIOB_MODER: *mut u32 = GPIOB_BASE as *mut u32;
@@ -321,9 +320,7 @@ impl TickTimer for SysTickTimer {
     }
 
     fn on_heartbeat(&mut self, led_on: bool) {
-        unsafe {
-            write_volatile(GPIOA_BSRR, if led_on { 1 << 16 } else { 1 });
-        }
+        status_led_set(led_on);
     }
 }
 
@@ -515,6 +512,7 @@ impl BusTransport for I3c2Transport {
     }
 
     fn prepare_for_jump(&mut self) {
+        status_led_set(false);
         unsafe {
             reset_i3c2_bus();
             write_volatile(GPIOB_MODER, read_volatile(GPIOB_MODER) | 0x03C0);
@@ -640,13 +638,35 @@ unsafe fn reset_i3c2_bus() {
     }
 }
 
+#[inline(always)]
+fn status_led_set(led_on: bool) {
+    if let Some((port, pin, active_low)) = STATUS_LED_CONFIG {
+        let gpio_base = GPIOA_BASE + ((port as u32) - ('A' as u32)) * 0x0400;
+        let bsrr = (gpio_base + 0x18) as *mut u32;
+        let drive_high = led_on ^ active_low;
+        let val = if drive_high {
+            1u32 << (pin as u32)
+        } else {
+            1u32 << ((pin as u32) + 16)
+        };
+        unsafe {
+            write_volatile(bsrr, val);
+        }
+    }
+}
+
 fn init_clocks_and_pins() {
     unsafe {
-        // Enable FLASH, GPIO clocks (A/B + any port in INITIAL_SAFE_PINS), I3C2 clock
+        // Enable FLASH, GPIO clocks (A/B + any port in INITIAL_SAFE_PINS + STATUS_LED_CONFIG), I3C2 clock
         let mut gpio_clocks: u32 = 0x03; // GPIOA | GPIOB
         for sp in INITIAL_SAFE_PINS {
             if ('A'..='H').contains(&sp.port) {
                 gpio_clocks |= 1u32 << ((sp.port as u32) - ('A' as u32));
+            }
+        }
+        if let Some((port, _, _)) = STATUS_LED_CONFIG {
+            if ('A'..='H').contains(&port) {
+                gpio_clocks |= 1u32 << ((port as u32) - ('A' as u32));
             }
         }
         write_volatile(RCC_AHB1ENR, read_volatile(RCC_AHB1ENR) | (1 << 8) | (1 << 31));
@@ -687,10 +707,25 @@ fn init_clocks_and_pins() {
             }
         });
 
-        // PA0 = LED_B (active LOW output)
-        let moder_a = read_volatile(GPIOA_MODER);
-        write_volatile(GPIOA_MODER, (moder_a & !0x03) | 0x01);
-        write_volatile(GPIOA_BSRR, 1 << 16); // LED ON
+        if let Some((port, pin, active_low)) = STATUS_LED_CONFIG {
+            if ('A'..='H').contains(&port) && pin <= 15 {
+                let gpio_base = GPIOA_BASE + ((port as u32) - ('A' as u32)) * 0x0400;
+                let moder = gpio_base as *mut u32;
+                let pupdr = (gpio_base + 0x0C) as *mut u32;
+                let bsrr = (gpio_base + 0x18) as *mut u32;
+                let shift = (pin as u32) * 2;
+                let mask = 0x03u32 << shift;
+                // Drive inactive first, then configure as push-pull output
+                let inactive_val = if active_low {
+                    1u32 << (pin as u32)
+                } else {
+                    1u32 << ((pin as u32) + 16)
+                };
+                write_volatile(bsrr, inactive_val);
+                write_volatile(pupdr, read_volatile(pupdr) & !mask);
+                write_volatile(moder, (read_volatile(moder) & !mask) | (0x01 << shift));
+            }
+        }
     }
 }
 

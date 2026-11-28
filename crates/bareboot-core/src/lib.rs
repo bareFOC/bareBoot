@@ -271,8 +271,8 @@ pub use hal::{
 };
 pub mod runner;
 pub use runner::{
-    validate_app_vector_from_flash, validate_app_vector_with_arch, verify_app_crc32, BootRunner,
-    NoopWatchdog, RunnerAction,
+    compute_led_on, validate_app_vector_from_flash, validate_app_vector_with_arch,
+    verify_app_crc32, BootRunner, BootStatus, NoopWatchdog, RunnerAction,
 };
 
 #[cfg(test)]

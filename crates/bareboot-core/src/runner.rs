@@ -190,6 +190,36 @@ pub enum RunnerAction {
     SystemReset,
 }
 
+/// High-level bootloader status used to drive the single-LED indicator pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootStatus {
+    /// Initial boot window waiting for host activity before jumping to app.
+    BootWindow,
+    /// Parked in bootloader mode (requested via mailbox or bus activity), idle.
+    Parked,
+    /// Active firmware programming (RX_BLOCK / RX_EOF / COMPLETE).
+    Flashing,
+    /// No valid application image in flash.
+    BlankApp,
+    /// Boot-loop trap triggered or flash write/commit error occurred.
+    BootLoopError,
+}
+
+/// Compute whether the status LED should be illuminated at `ms` milliseconds
+/// for the given `BootStatus`.
+pub const fn compute_led_on(status: BootStatus, ms: u32) -> bool {
+    let phase = ms % 1000;
+    match status {
+        BootStatus::BootWindow => true,
+        BootStatus::Parked => phase < 500,
+        BootStatus::Flashing => (ms % 100) < 50,
+        BootStatus::BlankApp => phase < 100 || (phase >= 200 && phase < 300),
+        BootStatus::BootLoopError => {
+            phase < 80 || (phase >= 160 && phase < 240) || (phase >= 320 && phase < 400)
+        }
+    }
+}
+
 /// Generic, zero-heap, monomorphized bootloader state machine.
 pub struct BootRunner<
     P: BootPlatform,
@@ -211,6 +241,8 @@ pub struct BootRunner<
     boot_window_active: bool,
     ms_elapsed: u32,
     idle_ms: u32,
+    flash_activity_ms: u32,
+    flash_error: bool,
     led_on: bool,
     rx_buf: [u8; 256],
     tx_buf: [u8; 256],
@@ -268,7 +300,7 @@ impl<
         };
         let writer = PagedWriter::new(target, config);
 
-        Self {
+        let mut runner = Self {
             writer,
             transport,
             watchdog,
@@ -283,9 +315,37 @@ impl<
             boot_window_active,
             ms_elapsed: 0,
             idle_ms: 0,
-            led_on: true,
+            flash_activity_ms: 0,
+            flash_error: false,
+            led_on: false,
             rx_buf: [0u8; 256],
             tx_buf: [0u8; 256],
+        };
+        let initial_led = compute_led_on(runner.status(), 0);
+        runner.led_on = initial_led;
+        runner.timer.on_heartbeat(initial_led);
+        runner
+    }
+
+    pub fn status(&self) -> BootStatus {
+        if self.flash_activity_ms > 0 {
+            BootStatus::Flashing
+        } else if self.boot_loop_trapped || self.flash_error {
+            BootStatus::BootLoopError
+        } else if !self.app_integrity_ok {
+            BootStatus::BlankApp
+        } else if self.boot_window_active {
+            BootStatus::BootWindow
+        } else {
+            BootStatus::Parked
+        }
+    }
+
+    fn sync_led(&mut self) {
+        let next_led = compute_led_on(self.status(), self.ms_elapsed);
+        if next_led != self.led_on {
+            self.led_on = next_led;
+            self.timer.on_heartbeat(next_led);
         }
     }
 
@@ -319,10 +379,8 @@ impl<
         if self.timer.poll_1ms() {
             self.ms_elapsed = self.ms_elapsed.wrapping_add(1);
             self.idle_ms = self.idle_ms.saturating_add(1);
-            if self.ms_elapsed % 250 == 0 {
-                self.led_on = !self.led_on;
-                self.timer.on_heartbeat(self.led_on);
-            }
+            self.flash_activity_ms = self.flash_activity_ms.saturating_sub(1);
+            self.sync_led();
             self.transport.on_tick_1ms();
 
             if let Some(limit) = self.idle_timeout_ms {
@@ -349,20 +407,52 @@ impl<
                 if let Some(addr) = self.boot_loop_guard_addr {
                     BootLoopGuard::clear(addr);
                 }
+                self.sync_led();
             }
             PollEvent::BusActivity => {
                 self.idle_ms = 0;
                 self.boot_window_active = false;
+                self.sync_led();
             }
             PollEvent::Frame(rx_len) => {
                 self.idle_ms = 0;
+                let cmd = match bareboot_protocol::scan(&self.rx_buf[..rx_len]) {
+                    bareboot_protocol::FrameParse::Complete { command, .. } => Some(command),
+                    _ => None,
+                };
+                if matches!(
+                    cmd,
+                    Some(
+                        bareboot_protocol::commands::RX_BLOCK
+                            | bareboot_protocol::commands::RX_EOF
+                            | bareboot_protocol::commands::COMPLETE
+                    )
+                ) {
+                    self.flash_activity_ms = 150;
+                    self.flash_error = false;
+                } else if matches!(cmd, Some(bareboot_protocol::commands::CONNECT)) {
+                    self.flash_error = false;
+                }
                 let resp_len = match dispatch_one(
                     &mut self.writer,
                     &self.rx_buf[..rx_len],
                     &mut self.tx_buf,
                 ) {
-                    Ok(len) => len,
+                    Ok(len) => {
+                        if len > 0 {
+                            if let bareboot_protocol::FrameParse::Complete { command, .. } =
+                                bareboot_protocol::scan(&self.tx_buf[..len])
+                            {
+                                if command == responses::COMMAND_ERROR || command == responses::NACK
+                                {
+                                    self.flash_error = true;
+                                }
+                            }
+                        }
+                        len
+                    }
                     Err(_) => {
+                        self.flash_error = true;
                         bareboot_protocol::encode_frame(responses::NACK, &[], &mut self.tx_buf)
                             .unwrap_or(0)
                     }
@@ -371,6 +461,7 @@ impl<
                     self.boot_window_active = false;
                     let _ = self.transport.send_tx(&self.tx_buf[..resp_len]);
                 }
+                self.sync_led();
                 if self.writer.is_completed() && self.transport.tx_idle() {
                     if let Some(addr) = self.boot_loop_guard_addr {
                         BootLoopGuard::clear(addr);
@@ -846,5 +937,85 @@ mod tests {
             assert_eq!(runner.step(), RunnerAction::Continue);
         }
         assert_eq!(runner.step(), RunnerAction::SystemReset);
+    }
+
+    #[test]
+    fn status_led_patterns_for_all_five_states() {
+        // BootWindow: solid ON
+        for ms in [0, 50, 499, 500, 999, 1234] {
+            assert!(compute_led_on(BootStatus::BootWindow, ms));
+        }
+
+        // Parked: 1 Hz 50% duty (0..500 ON, 500..1000 OFF)
+        assert!(compute_led_on(BootStatus::Parked, 0));
+        assert!(compute_led_on(BootStatus::Parked, 499));
+        assert!(!compute_led_on(BootStatus::Parked, 500));
+        assert!(!compute_led_on(BootStatus::Parked, 999));
+        assert!(compute_led_on(BootStatus::Parked, 1000));
+
+        // Flashing: 10 Hz 50% duty (0..50 ON, 50..100 OFF)
+        assert!(compute_led_on(BootStatus::Flashing, 0));
+        assert!(compute_led_on(BootStatus::Flashing, 49));
+        assert!(!compute_led_on(BootStatus::Flashing, 50));
+        assert!(!compute_led_on(BootStatus::Flashing, 99));
+        assert!(compute_led_on(BootStatus::Flashing, 100));
+
+        // BlankApp: double-blink (0..100, 200..300)
+        assert!(compute_led_on(BootStatus::BlankApp, 0));
+        assert!(compute_led_on(BootStatus::BlankApp, 99));
+        assert!(!compute_led_on(BootStatus::BlankApp, 100));
+        assert!(!compute_led_on(BootStatus::BlankApp, 199));
+        assert!(compute_led_on(BootStatus::BlankApp, 200));
+        assert!(compute_led_on(BootStatus::BlankApp, 299));
+        assert!(!compute_led_on(BootStatus::BlankApp, 300));
+        assert!(!compute_led_on(BootStatus::BlankApp, 999));
+
+        // BootLoopError: triple-blink (0..80, 160..240, 320..400)
+        assert!(compute_led_on(BootStatus::BootLoopError, 0));
+        assert!(compute_led_on(BootStatus::BootLoopError, 79));
+        assert!(!compute_led_on(BootStatus::BootLoopError, 80));
+        assert!(compute_led_on(BootStatus::BootLoopError, 160));
+        assert!(compute_led_on(BootStatus::BootLoopError, 239));
+        assert!(!compute_led_on(BootStatus::BootLoopError, 240));
+        assert!(compute_led_on(BootStatus::BootLoopError, 320));
+        assert!(compute_led_on(BootStatus::BootLoopError, 399));
+        assert!(!compute_led_on(BootStatus::BootLoopError, 400));
+        assert!(!compute_led_on(BootStatus::BootLoopError, 999));
+    }
+
+    #[test]
+    fn runner_status_priority_transitions() {
+        // Blank flash -> BlankApp
+        let app_flash = MockMemFlash::new(APP_BASE, APP_SIZE);
+        let commit_flash = MockMemFlash::new(COMMIT_BASE, COMMIT_SIZE);
+        let mut transport = MockTransport::new();
+        // Send an invalid RX_BLOCK (wrong length) to trigger flash_activity_ms=150 and flash_error=true
+        let mut bad_frame = [0u8; 64];
+        let flen = encode_frame(commands::RX_BLOCK, &[0u8; 4], &mut bad_frame).unwrap();
+        transport.push_rx(&bad_frame[..flen]);
+
+        let platform = MockPlatform {
+            app_flash,
+            commit_flash,
+            transport,
+            timer: MockTimer { ticks_available: 200 },
+            reset_reason: ResetReason::PowerOn,
+            guard_addr: None,
+            mailbox_addr: None,
+            boot_window_ms: 1500,
+            idle_timeout_ms: None,
+        };
+        let mut runner = BootRunner::<MockPlatform, PAGE, COMMIT_SIZE, 16>::new(platform);
+        assert_eq!(runner.status(), BootStatus::BlankApp);
+
+        // Step processes 1 tick + the bad RX_BLOCK frame -> Flashing (150ms) takes priority over BootLoopError
+        assert_eq!(runner.step(), RunnerAction::Continue);
+        assert_eq!(runner.status(), BootStatus::Flashing);
+
+        // Advance 150 ticks until flash_activity_ms decays to 0 -> BootLoopError (since flash_error=true)
+        for _ in 0..150 {
+            assert_eq!(runner.step(), RunnerAction::Continue);
+        }
+        assert_eq!(runner.status(), BootStatus::BootLoopError);
     }
 }
