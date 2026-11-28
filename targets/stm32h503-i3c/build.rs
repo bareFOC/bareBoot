@@ -143,12 +143,149 @@ fn extract_status_led_from_toml(toml_text: &str) -> Option<String> {
     None
 }
 
+fn parse_num_u32(raw: &str) -> Option<u32> {
+    let s = raw.split('#').next()?.trim().replace('_', "");
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<u32>().ok()
+    }
+}
+
+fn strip_toml_str(raw: &str) -> Option<String> {
+    let val = raw.split('#').next()?.trim();
+    let quote = val.chars().next()?;
+    if quote == '"' || quote == '\'' {
+        let rest = &val[1..];
+        if let Some(end) = rest.find(quote) {
+            return Some(rest[..end].to_string());
+        }
+    }
+    None
+}
+
+fn parse_gpio_port_pin(spec: &str) -> Option<(char, u8)> {
+    let (port, pin, _) = parse_status_led_pin(spec)?;
+    Some((port, pin))
+}
+
+struct ParsedBoardToml {
+    flash_origin: u32,
+    flash_size: u32,
+    ram_origin: u32,
+    ram_size: u32,
+    bootloader_origin: u32,
+    bootloader_size: u32,
+    app_origin: u32,
+    app_size: u32,
+    page_size: u32,
+    mailbox_addr: u32,
+    boot_window_ms: u32,
+    host_peripheral: String,
+    host_scl: (char, u8),
+    host_sda: (char, u8),
+    host_static_addr: u8,
+    status_led: Option<String>,
+    bl_port_count: usize,
+}
+
+impl Default for ParsedBoardToml {
+    fn default() -> Self {
+        Self {
+            flash_origin: 0x0800_0000,
+            flash_size: 131_072,
+            ram_origin: 0x2000_0000,
+            ram_size: 32_768,
+            bootloader_origin: 0x0800_0000,
+            bootloader_size: 16_384,
+            app_origin: 0x0800_4000,
+            app_size: 90_112,
+            page_size: 8_192,
+            mailbox_addr: 0x2000_7FE0,
+            boot_window_ms: 1500,
+            host_peripheral: "I3C2".to_string(),
+            host_scl: ('B', 3),
+            host_sda: ('B', 4),
+            host_static_addr: 0x40,
+            status_led: Some("!PA1".to_string()),
+            bl_port_count: 1,
+        }
+    }
+}
+
+fn parse_board_toml(toml_text: &str) -> ParsedBoardToml {
+    let mut cfg = ParsedBoardToml::default();
+    cfg.status_led = extract_status_led_from_toml(toml_text);
+    cfg.bl_port_count = count_bootloader_ports_from_toml(toml_text);
+
+    let mut section = String::new();
+    let mut app_origin_set = false;
+    let mut app_size_set = false;
+    let mut nvm_size_val: Option<u32> = None;
+
+    for raw_line in toml_text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && !line.starts_with("[[") {
+            if let Some(end) = line.find(']') {
+                section = line[1..end].trim().to_string();
+            }
+            continue;
+        }
+        let Some((k_raw, v_raw)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k_raw.trim();
+        match section.as_str() {
+            "memory" => match key {
+                "flash_origin" => if let Some(v) = parse_num_u32(v_raw) { cfg.flash_origin = v; },
+                "flash_size" => if let Some(v) = parse_num_u32(v_raw) { cfg.flash_size = v; },
+                "ram_origin" => if let Some(v) = parse_num_u32(v_raw) { cfg.ram_origin = v; },
+                "ram_size" => if let Some(v) = parse_num_u32(v_raw) { cfg.ram_size = v; },
+                "bootloader_origin" => if let Some(v) = parse_num_u32(v_raw) { cfg.bootloader_origin = v; },
+                "bootloader_size" => if let Some(v) = parse_num_u32(v_raw) { cfg.bootloader_size = v; },
+                "app_origin" => if let Some(v) = parse_num_u32(v_raw) { cfg.app_origin = v; app_origin_set = true; },
+                "app_size" => if let Some(v) = parse_num_u32(v_raw) { cfg.app_size = v; app_size_set = true; },
+                "nvm_size" => { nvm_size_val = parse_num_u32(v_raw); },
+                "page_size" => if let Some(v) = parse_num_u32(v_raw) { cfg.page_size = v; },
+                _ => {}
+            },
+            "bootloader" => match key {
+                "mailbox_address" => if let Some(v) = parse_num_u32(v_raw) { cfg.mailbox_addr = v; },
+                "boot_window_ms" => if let Some(v) = parse_num_u32(v_raw) { cfg.boot_window_ms = v; },
+                _ => {}
+            },
+            "communication.host" => match key {
+                "peripheral" => if let Some(s) = strip_toml_str(v_raw) { cfg.host_peripheral = s.to_ascii_uppercase(); },
+                "tx_scl_pin" => if let Some(s) = strip_toml_str(v_raw).and_then(|p| parse_gpio_port_pin(&p)) { cfg.host_scl = s; },
+                "rx_sda_pin" => if let Some(s) = strip_toml_str(v_raw).and_then(|p| parse_gpio_port_pin(&p)) { cfg.host_sda = s; },
+                "address" => if let Some(v) = parse_num_u32(v_raw) { cfg.host_static_addr = v as u8; },
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    if !app_origin_set {
+        cfg.app_origin = cfg.bootloader_origin + cfg.bootloader_size;
+    }
+    if !app_size_set {
+        let nvm_sz = nvm_size_val.unwrap_or(16_384);
+        let commit_sz = cfg.page_size;
+        cfg.app_size = cfg
+            .flash_size
+            .saturating_sub(cfg.bootloader_size)
+            .saturating_sub(commit_sz)
+            .saturating_sub(nvm_sz);
+    }
+
+    cfg
+}
+
 fn main() {
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    File::create(out.join("memory.x"))
-        .unwrap()
-        .write_all(include_bytes!("memory.x"))
-        .unwrap();
     File::create(out.join("device.x"))
         .unwrap()
         .write_all(b"")
@@ -179,18 +316,78 @@ fn main() {
     let config_path = env::var("BAREBOOT_CONFIG")
         .ok()
         .or_else(|| env::var("BAREFOC_BOARD").ok());
-    let (status_led_spec, bl_port_count): (Option<String>, usize) = if let Some(ref path) = config_path {
+    let parsed = if let Some(ref path) = config_path {
         println!("cargo:rerun-if-changed={path}");
         let text = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("Failed to read config {path}: {e}"));
-        (
-            extract_status_led_from_toml(&text),
-            count_bootloader_ports_from_toml(&text),
-        )
+        parse_board_toml(&text)
     } else {
-        (Some("!PA1".to_string()), 1)
+        ParsedBoardToml::default()
     };
 
+    let stack_start = parsed.ram_origin + parsed.ram_size - 48;
+    let ram_len = parsed.ram_size - 48;
+    let memory_x = format!(
+        "MEMORY\n{{\n  FLASH : ORIGIN = 0x{:08X}, LENGTH = {}K\n  RAM   : ORIGIN = 0x{:08X}, LENGTH = {}\n}}\n_stack_start = 0x{:08X};\n",
+        parsed.bootloader_origin,
+        parsed.bootloader_size / 1024,
+        parsed.ram_origin,
+        ram_len,
+        stack_start,
+    );
+    File::create(out.join("memory.x"))
+        .unwrap()
+        .write_all(memory_x.as_bytes())
+        .unwrap();
+
+    let app_base = parsed.app_origin;
+    let app_end = parsed.app_origin + parsed.app_size;
+    let commit_base = app_end;
+    let commit_size = parsed.page_size;
+    let page_size = parsed.page_size;
+
+    let (i3c_base, rcc_rstr_off, rcc_enr_off, rcc_bit, host_af): (u32, u32, u32, u32, u8) =
+        match parsed.host_peripheral.as_str() {
+            "I3C1" => (0x4000_5C00, 0x074, 0x09C, 23, 4), // APB1L
+            _ => (0x4400_3000, 0x080, 0x0A8, 9, 3),       // I3C2 APB3
+        };
+
+    let board_cfg_rs = format!(
+        "pub const APP_BASE: u32 = 0x{app_base:08X};\n\
+         pub const APP_END: u32 = 0x{app_end:08X};\n\
+         pub const COMMIT_BASE: u32 = 0x{commit_base:08X};\n\
+         pub const COMMIT_SIZE: usize = {commit_size};\n\
+         pub const PAGE_SIZE: usize = {page_size};\n\
+         pub const RAM_START: u32 = 0x{:08X};\n\
+         pub const RAM_END: u32 = 0x{:08X};\n\
+         pub const MAILBOX_ADDR: u32 = 0x{:08X};\n\
+         pub const BOOT_WINDOW_MS: u32 = {};\n\
+         pub const HOST_STATIC_ADDR: u8 = 0x{:02X};\n\
+         pub const I3C_BASE: u32 = 0x{i3c_base:08X};\n\
+         pub const RCC_I3C_RSTR_OFFSET: u32 = 0x{rcc_rstr_off:03X};\n\
+         pub const RCC_I3C_ENR_OFFSET: u32 = 0x{rcc_enr_off:03X};\n\
+         pub const RCC_I3C_BIT: u32 = {rcc_bit};\n\
+         pub const HOST_SCL_PORT: char = '{}';\n\
+         pub const HOST_SCL_PIN: u8 = {};\n\
+         pub const HOST_SDA_PORT: char = '{}';\n\
+         pub const HOST_SDA_PIN: u8 = {};\n\
+         pub const HOST_AF: u8 = {host_af};\n",
+        parsed.ram_origin,
+        parsed.ram_origin + parsed.ram_size,
+        parsed.mailbox_addr,
+        parsed.boot_window_ms,
+        parsed.host_static_addr,
+        parsed.host_scl.0,
+        parsed.host_scl.1,
+        parsed.host_sda.0,
+        parsed.host_sda.1,
+    );
+    File::create(out.join("board_config_generated.rs"))
+        .unwrap()
+        .write_all(board_cfg_rs.as_bytes())
+        .unwrap();
+
+    let bl_port_count = parsed.bl_port_count;
     let use_multi_arbiter = bl_port_count >= 2;
     let transport_rs = format!(
         "#[allow(dead_code)]\npub const BOOTLOADER_PORT_COUNT: usize = {bl_port_count};\n#[allow(dead_code)]\npub const USE_MULTI_TRANSPORT_ARBITER: bool = {use_multi_arbiter};\n"
@@ -200,7 +397,7 @@ fn main() {
         .write_all(transport_rs.as_bytes())
         .unwrap();
 
-    let status_led_rs = match status_led_spec.as_deref().map(str::trim) {
+    let status_led_rs = match parsed.status_led.as_deref().map(str::trim) {
         Some("") | None => {
             "pub const STATUS_LED_CONFIG: Option<(char, u8, bool)> = None;\n".to_string()
         }

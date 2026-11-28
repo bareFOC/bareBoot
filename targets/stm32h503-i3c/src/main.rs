@@ -11,24 +11,14 @@ use bareboot_protocol::{ccc, SoftResetMailbox, REQUEST_BOOTLOADER};
 use core::ptr::{read_volatile, write_volatile};
 use cortex_m_rt::entry;
 
+include!(concat!(env!("OUT_DIR"), "/board_config_generated.rs"));
 include!(concat!(env!("OUT_DIR"), "/safe_pins_generated.rs"));
 include!(concat!(env!("OUT_DIR"), "/status_led_generated.rs"));
 include!(concat!(env!("OUT_DIR"), "/transport_arbiter_generated.rs"));
 
-const APP_BASE: u32 = 0x0800_4000;
-const APP_END: u32 = 0x0801_A000; // Sectors 2..12 (88 KiB)
-const COMMIT_BASE: u32 = 0x0801_A000; // Sector 13 (8 KiB)
-const COMMIT_SIZE: usize = 8192;
-const PAGE_SIZE: usize = 8192;
-const BLOCK_SIZE: usize = 64;
-
-const RAM_START: u32 = 0x2000_0000;
-const RAM_END: u32 = 0x2000_8000;
 const BOOT_LOOP_GUARD_ADDR: usize = 0x2000_7FD0;
-const MAILBOX_ADDR: u32 = 0x2000_7FE0;
 const LEGACY_COOKIE_ADDR: usize = 0x2000_7FF8;
 
-const BOOT_WINDOW_MS: u32 = 1500;
 const BOOTLOADER_IDLE_TIMEOUT_MS: u32 = 30_000;
 const I3C2_IDLE_RESET_MS: u32 = 2_000;
 const SYSCLK_HZ: u32 = 32_000_000; // STM32H503 reset HSIDIV=/2 (32 MHz)
@@ -37,30 +27,26 @@ const SYST_CSR: *mut u32 = 0xE000_E010 as *mut u32;
 const SYST_RVR: *mut u32 = 0xE000_E014 as *mut u32;
 const SYST_CVR: *mut u32 = 0xE000_E018 as *mut u32;
 
+const BLOCK_SIZE: usize = 64;
+
 // RCC (Non-Secure)
 const RCC_BASE: u32 = 0x4402_0C00;
-const RCC_APB3RSTR: *mut u32 = (RCC_BASE + 0x080) as *mut u32;
+const RCC_I3C_RSTR: *mut u32 = (RCC_BASE + RCC_I3C_RSTR_OFFSET) as *mut u32;
 const RCC_AHB1ENR: *mut u32 = (RCC_BASE + 0x088) as *mut u32;
 const RCC_AHB2ENR: *mut u32 = (RCC_BASE + 0x08C) as *mut u32;
-const RCC_APB3ENR: *mut u32 = (RCC_BASE + 0x0A8) as *mut u32;
+const RCC_I3C_ENR: *mut u32 = (RCC_BASE + RCC_I3C_ENR_OFFSET) as *mut u32;
 const RCC_RSR: *mut u32 = (RCC_BASE + 0x0F4) as *mut u32;
-const APB3RSTR_I3C2RST: u32 = 1 << 9;
+const I3C_RCC_MASK: u32 = 1 << RCC_I3C_BIT;
 const RSR_RMVF: u32 = 1 << 23;
 const RSR_SFTRSTF: u32 = 1 << 28;
 const RSR_IWDGRSTF: u32 = 1 << 29;
 const RSR_WWDGRSTF: u32 = 1 << 30;
 
-// GPIOA / GPIOB (Non-Secure)
+// GPIOA..GPIOH (Non-Secure)
 const GPIOA_BASE: u32 = 0x4202_0000;
-
-const GPIOB_BASE: u32 = 0x4202_0400;
-const GPIOB_MODER: *mut u32 = GPIOB_BASE as *mut u32;
-const GPIOB_OTYPER: *mut u32 = (GPIOB_BASE + 0x04) as *mut u32;
-const GPIOB_OSPEEDR: *mut u32 = (GPIOB_BASE + 0x08) as *mut u32;
-const GPIOB_PUPDR: *mut u32 = (GPIOB_BASE + 0x0C) as *mut u32;
-const GPIOB_IDR: *const u32 = (GPIOB_BASE + 0x10) as *const u32;
-const GPIOB_AFRL: *mut u32 = (GPIOB_BASE + 0x20) as *mut u32;
-const PB4_SDA_MASK: u32 = 1 << 4;
+const HOST_SDA_GPIO_IDR: *const u32 =
+    (GPIOA_BASE + ((HOST_SDA_PORT as u32) - ('A' as u32)) * 0x0400 + 0x10) as *const u32;
+const HOST_SDA_MASK: u32 = 1 << (HOST_SDA_PIN as u32);
 
 // FLASH (Non-Secure)
 const FLASH_BASE: u32 = 0x4002_2000;
@@ -82,25 +68,24 @@ const IWDG_PR: *mut u32 = (IWDG_BASE + 0x04) as *mut u32;
 const IWDG_RLR: *mut u32 = (IWDG_BASE + 0x08) as *mut u32;
 const IWDG_SR: *const u32 = (IWDG_BASE + 0x0C) as *const u32;
 
-// I3C2 (APB3 Non-Secure, PB3=SCL AF3, PB4=SDA AF3)
-const I3C2_BASE: u32 = 0x4400_3000;
-const I3C2_CFGR: *mut u32 = (I3C2_BASE + 0x04) as *mut u32;
-const I3C2_RDR: *const u32 = (I3C2_BASE + 0x10) as *const u32;
-const I3C2_TDR: *mut u32 = (I3C2_BASE + 0x18) as *mut u32;
-const I3C2_TGTTDR: *mut u32 = (I3C2_BASE + 0x24) as *mut u32;
-const I3C2_SER: *const u32 = (I3C2_BASE + 0x34) as *const u32;
-const I3C2_RMR: *const u32 = (I3C2_BASE + 0x40) as *const u32;
-const I3C2_EVR: *const u32 = (I3C2_BASE + 0x50) as *const u32;
-const I3C2_CEVR: *mut u32 = (I3C2_BASE + 0x58) as *mut u32;
-const I3C2_DEVR0: *mut u32 = (I3C2_BASE + 0x60) as *mut u32;
-const I3C2_MAXRLR: *mut u32 = (I3C2_BASE + 0x90) as *mut u32;
-const I3C2_MAXWLR: *mut u32 = (I3C2_BASE + 0x94) as *mut u32;
-const I3C2_TIMINGR0: *mut u32 = (I3C2_BASE + 0xA0) as *mut u32;
-const I3C2_TIMINGR1: *mut u32 = (I3C2_BASE + 0xA4) as *mut u32;
-const I3C2_TIMINGR2: *mut u32 = (I3C2_BASE + 0xA8) as *mut u32;
-const I3C2_BCR: *mut u32 = (I3C2_BASE + 0xC0) as *mut u32;
-const I3C2_DCR: *mut u32 = (I3C2_BASE + 0xC4) as *mut u32;
-const I3C2_EPIDR: *mut u32 = (I3C2_BASE + 0xD4) as *mut u32;
+// I3C peripheral registers (base from board_config_generated.rs)
+const I3C2_CFGR: *mut u32 = (I3C_BASE + 0x04) as *mut u32;
+const I3C2_RDR: *const u32 = (I3C_BASE + 0x10) as *const u32;
+const I3C2_TDR: *mut u32 = (I3C_BASE + 0x18) as *mut u32;
+const I3C2_TGTTDR: *mut u32 = (I3C_BASE + 0x24) as *mut u32;
+const I3C2_SER: *const u32 = (I3C_BASE + 0x34) as *const u32;
+const I3C2_RMR: *const u32 = (I3C_BASE + 0x40) as *const u32;
+const I3C2_EVR: *const u32 = (I3C_BASE + 0x50) as *const u32;
+const I3C2_CEVR: *mut u32 = (I3C_BASE + 0x58) as *mut u32;
+const I3C2_DEVR0: *mut u32 = (I3C_BASE + 0x60) as *mut u32;
+const I3C2_MAXRLR: *mut u32 = (I3C_BASE + 0x90) as *mut u32;
+const I3C2_MAXWLR: *mut u32 = (I3C_BASE + 0x94) as *mut u32;
+const I3C2_TIMINGR0: *mut u32 = (I3C_BASE + 0xA0) as *mut u32;
+const I3C2_TIMINGR1: *mut u32 = (I3C_BASE + 0xA4) as *mut u32;
+const I3C2_TIMINGR2: *mut u32 = (I3C_BASE + 0xA8) as *mut u32;
+const I3C2_BCR: *mut u32 = (I3C_BASE + 0xC0) as *mut u32;
+const I3C2_DCR: *mut u32 = (I3C_BASE + 0xC4) as *mut u32;
+const I3C2_EPIDR: *mut u32 = (I3C_BASE + 0xD4) as *mut u32;
 
 const CFGR_RXFLUSH: u32 = 1 << 9;
 const CFGR_TXFLUSH: u32 = 1 << 13;
@@ -366,7 +351,7 @@ impl BusTransport for I3c2Transport {
     fn on_tick_1ms(&mut self) {
         unsafe {
             self.i3c_idle_ms = self.i3c_idle_ms.saturating_add(1);
-            let sda_low = (read_volatile(GPIOB_IDR) & PB4_SDA_MASK) == 0;
+            let sda_low = (read_volatile(HOST_SDA_GPIO_IDR) & HOST_SDA_MASK) == 0;
             let bus_progress = (read_volatile(I3C2_EVR)
                 & (EVR_FCF | EVR_RXFNEF | EVR_DAUPDF | EVR_RSTF | EVR_ERRF))
                 != 0;
@@ -516,7 +501,8 @@ impl BusTransport for I3c2Transport {
         status_led_set(false);
         unsafe {
             reset_i3c2_bus();
-            write_volatile(GPIOB_MODER, read_volatile(GPIOB_MODER) | 0x03C0);
+            set_pin_analog(HOST_SCL_PORT, HOST_SCL_PIN);
+            set_pin_analog(HOST_SDA_PORT, HOST_SDA_PIN);
         }
     }
 }
@@ -630,12 +616,12 @@ fn read_mailbox_request(fallback_addr: u8) -> (bool, u8) {
 unsafe fn reset_i3c2_bus() {
     unsafe {
         write_volatile(I3C2_CFGR, 0);
-        let rstr = read_volatile(RCC_APB3RSTR);
-        write_volatile(RCC_APB3RSTR, rstr | APB3RSTR_I3C2RST);
+        let rstr = read_volatile(RCC_I3C_RSTR);
+        write_volatile(RCC_I3C_RSTR, rstr | I3C_RCC_MASK);
         for _ in 0..8 {
             cortex_m::asm::nop();
         }
-        write_volatile(RCC_APB3RSTR, rstr & !APB3RSTR_I3C2RST);
+        write_volatile(RCC_I3C_RSTR, rstr & !I3C_RCC_MASK);
     }
 }
 
@@ -670,10 +656,16 @@ fn init_clocks_and_pins() {
                 gpio_clocks |= 1u32 << ((port as u32) - ('A' as u32));
             }
         }
+        if ('A'..='H').contains(&HOST_SCL_PORT) {
+            gpio_clocks |= 1u32 << ((HOST_SCL_PORT as u32) - ('A' as u32));
+        }
+        if ('A'..='H').contains(&HOST_SDA_PORT) {
+            gpio_clocks |= 1u32 << ((HOST_SDA_PORT as u32) - ('A' as u32));
+        }
         write_volatile(RCC_AHB1ENR, read_volatile(RCC_AHB1ENR) | (1 << 8) | (1 << 31));
         write_volatile(RCC_AHB2ENR, read_volatile(RCC_AHB2ENR) | gpio_clocks);
-        write_volatile(RCC_APB3ENR, read_volatile(RCC_APB3ENR) | (1 << 9));
-        let _ = read_volatile(RCC_APB3ENR);
+        write_volatile(RCC_I3C_ENR, read_volatile(RCC_I3C_ENR) | I3C_RCC_MASK);
+        let _ = read_volatile(RCC_I3C_ENR);
 
         // Apply configured safe pin states immediately on reset before peripheral init
         apply_safe_pins(INITIAL_SAFE_PINS, &mut |port, pin, mode| {
@@ -730,18 +722,43 @@ fn init_clocks_and_pins() {
     }
 }
 
+fn set_pin_analog(port: char, pin: u8) {
+    if !('A'..='H').contains(&port) || pin > 15 {
+        return;
+    }
+    let gpio_base = GPIOA_BASE + ((port as u32) - ('A' as u32)) * 0x0400;
+    let moder = gpio_base as *mut u32;
+    let shift2 = (pin as u32) * 2;
+    unsafe {
+        write_volatile(moder, read_volatile(moder) | (0x03 << shift2));
+    }
+}
+
+fn configure_af_pin(port: char, pin: u8, af: u8) {
+    if !('A'..='H').contains(&port) || pin > 15 {
+        return;
+    }
+    let gpio_base = GPIOA_BASE + ((port as u32) - ('A' as u32)) * 0x0400;
+    let moder = gpio_base as *mut u32;
+    let otyper = (gpio_base + 0x04) as *mut u32;
+    let ospeedr = (gpio_base + 0x08) as *mut u32;
+    let pupdr = (gpio_base + 0x0C) as *mut u32;
+    let afr = (gpio_base + if pin < 8 { 0x20 } else { 0x24 }) as *mut u32;
+    let shift2 = (pin as u32) * 2;
+    let shift4 = ((pin % 8) as u32) * 4;
+    unsafe {
+        write_volatile(moder, (read_volatile(moder) & !(0x03 << shift2)) | (0x02 << shift2));
+        write_volatile(otyper, read_volatile(otyper) & !(1u32 << pin));
+        write_volatile(ospeedr, read_volatile(ospeedr) | (0x03 << shift2));
+        write_volatile(pupdr, (read_volatile(pupdr) & !(0x03 << shift2)) | (0x01 << shift2));
+        write_volatile(afr, (read_volatile(afr) & !(0x0F << shift4)) | ((af as u32) << shift4));
+    }
+}
+
 fn init_i3c2(static_addr: u8, uid_mix: u32) {
     unsafe {
-        // PB3 (SCL) and PB4 (SDA) -> AF3 (I3C2), Very High Speed, Pull-Up, Push-Pull
-        let moder_b = read_volatile(GPIOB_MODER);
-        write_volatile(GPIOB_MODER, (moder_b & !0x03C0) | 0x0280);
-        write_volatile(GPIOB_OTYPER, read_volatile(GPIOB_OTYPER) & !0x18);
-        write_volatile(GPIOB_OSPEEDR, read_volatile(GPIOB_OSPEEDR) | 0x03C0);
-        write_volatile(GPIOB_PUPDR, (read_volatile(GPIOB_PUPDR) & !0x03C0) | 0x0140);
-        write_volatile(
-            GPIOB_AFRL,
-            (read_volatile(GPIOB_AFRL) & !0x000F_F000) | 0x0003_3000,
-        );
+        configure_af_pin(HOST_SCL_PORT, HOST_SCL_PIN, HOST_AF);
+        configure_af_pin(HOST_SDA_PORT, HOST_SDA_PIN, HOST_AF);
 
         write_volatile(I3C2_CFGR, 0);
         write_volatile(I3C2_CFGR, (1 << 3) | (1 << 4)); // RSTPTRN | EXITPTRN
@@ -785,7 +802,11 @@ fn main() -> ! {
         uid[i * 4..i * 4 + 4].copy_from_slice(&uid_words[i].to_le_bytes());
     }
     let uid_mix = uid_words[0] ^ uid_words[1] ^ uid_words[2];
-    let fallback_addr = bareboot_protocol::fallback_address(&uid_words);
+    let fallback_addr = if HOST_STATIC_ADDR != 0 {
+        HOST_STATIC_ADDR
+    } else {
+        bareboot_protocol::fallback_address(&uid_words)
+    };
 
     let (mailbox_req, node_addr) = read_mailbox_request(fallback_addr);
 
