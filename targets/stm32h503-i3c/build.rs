@@ -164,6 +164,88 @@ fn strip_toml_str(raw: &str) -> Option<String> {
     None
 }
 
+fn pin_spec_to_safe_inactive(spec: &str) -> Option<(char, u8, &'static str)> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('^') || trimmed.starts_with('~') {
+        return parse_klipper_pin(trimmed);
+    }
+    // In barefoc.toml [gate_driver], `!PIN` means active-low (safe inactive = OutputHigh),
+    // while `PIN` means active-high (safe inactive = OutputLow).
+    let (port, pin, _) = parse_klipper_pin(trimmed)?;
+    let mode = if trimmed.starts_with('!') {
+        "OutputHigh"
+    } else {
+        "OutputLow"
+    };
+    Some((port, pin, mode))
+}
+
+fn extract_gate_driver_safe_pins_from_toml(toml_text: &str) -> Vec<(char, u8, &'static str)> {
+    const PIN_KEYS: &[&str] = &[
+        "high_pwm_pin",
+        "low_pwm_pin",
+        "pwm_pin",
+        "en_pin",
+        "dir_pin",
+        "sleep_pin",
+        "cs_pin",
+        "fault_pin",
+        "inh_a",
+        "inh_b",
+        "inh_c",
+        "inl_a",
+        "inl_b",
+        "inl_c",
+    ];
+    let mut pins: Vec<(char, u8, &'static str)> = Vec::new();
+    let mut in_gate_driver = false;
+    for raw_line in toml_text.lines() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_gate_driver = line == "[gate_driver]"
+                || line.starts_with("[gate_driver.")
+                || line.starts_with("[[gate_driver.");
+            continue;
+        }
+        if !in_gate_driver {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        if !PIN_KEYS.contains(&key) {
+            continue;
+        }
+        let val = v.trim();
+        if val.starts_with('[') {
+            let inner = val.trim_start_matches('[').trim_end_matches(']');
+            for item in inner.split(',') {
+                if let Some(s) = strip_toml_str(item) {
+                    if let Some(entry) = pin_spec_to_safe_inactive(&s) {
+                        if !pins.iter().any(|&(p, n, _)| p == entry.0 && n == entry.1) {
+                            pins.push(entry);
+                        }
+                    }
+                }
+            }
+        } else if let Some(s) = strip_toml_str(val) {
+            if let Some(entry) = pin_spec_to_safe_inactive(&s) {
+                if !pins.iter().any(|&(p, n, _)| p == entry.0 && n == entry.1) {
+                    pins.push(entry);
+                }
+            }
+        }
+    }
+    pins
+}
+
 fn parse_gpio_port_pin(spec: &str) -> Option<(char, u8)> {
     let (port, pin, _) = parse_status_led_pin(spec)?;
     Some((port, pin))
@@ -309,39 +391,50 @@ fn main() {
         .write_all(b"")
         .unwrap();
 
-    let mut generated = String::from(
-        "pub static INITIAL_SAFE_PINS: &[bareboot_core::SafePin] = &bareboot_core::initial_safe_pins![\n",
-    );
+    let config_path = env::var("BAREBOOT_CONFIG")
+        .ok()
+        .or_else(|| env::var("BAREFOC_BOARD").ok());
+    let (parsed, toml_safe_pins) = if let Some(ref path) = config_path {
+        println!("cargo:rerun-if-changed={path}");
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("Failed to read config {path}: {e}"));
+        (
+            parse_board_toml(&text),
+            extract_gate_driver_safe_pins_from_toml(&text),
+        )
+    } else {
+        (ParsedBoardToml::default(), Vec::new())
+    };
+
+    let mut safe_pins = toml_safe_pins;
     if let Ok(raw) = env::var("BAREBOOT_SAFE_PINS") {
         for item in raw.split(',') {
             let trimmed = item.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            if let Some((port, pin, mode)) = parse_klipper_pin(trimmed) {
-                generated.push_str(&format!("    ('{port}', {pin}, {mode}),\n"));
+            if let Some(entry) = parse_klipper_pin(trimmed) {
+                if let Some(existing) = safe_pins.iter_mut().find(|(p, n, _)| *p == entry.0 && *n == entry.1) {
+                    *existing = entry;
+                } else {
+                    safe_pins.push(entry);
+                }
             } else {
                 panic!("Invalid Klipper pin in BAREBOOT_SAFE_PINS: {trimmed}");
             }
         }
+    }
+    let mut generated = String::from(
+        "pub static INITIAL_SAFE_PINS: &[bareboot_core::SafePin] = &bareboot_core::initial_safe_pins![\n",
+    );
+    for (port, pin, mode) in safe_pins {
+        generated.push_str(&format!("    ('{port}', {pin}, {mode}),\n"));
     }
     generated.push_str("];\n");
     File::create(out.join("safe_pins_generated.rs"))
         .unwrap()
         .write_all(generated.as_bytes())
         .unwrap();
-
-    let config_path = env::var("BAREBOOT_CONFIG")
-        .ok()
-        .or_else(|| env::var("BAREFOC_BOARD").ok());
-    let parsed = if let Some(ref path) = config_path {
-        println!("cargo:rerun-if-changed={path}");
-        let text = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("Failed to read config {path}: {e}"));
-        parse_board_toml(&text)
-    } else {
-        ParsedBoardToml::default()
-    };
 
     let stack_start = parsed.ram_origin + parsed.ram_size - 48;
     let ram_len = parsed.ram_size - 48;
