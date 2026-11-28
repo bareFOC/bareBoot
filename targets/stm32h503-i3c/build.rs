@@ -259,11 +259,29 @@ fn parse_board_toml(toml_text: &str) -> ParsedBoardToml {
             },
             "communication.host" => match key {
                 "peripheral" => if let Some(s) = strip_toml_str(v_raw) { cfg.host_peripheral = s.to_ascii_uppercase(); },
-                "tx_scl_pin" => if let Some(s) = strip_toml_str(v_raw).and_then(|p| parse_gpio_port_pin(&p)) { cfg.host_scl = s; },
-                "rx_sda_pin" => if let Some(s) = strip_toml_str(v_raw).and_then(|p| parse_gpio_port_pin(&p)) { cfg.host_sda = s; },
+                "scl_pin" | "tx_pin" | "tx_scl_pin" => if let Some(s) = strip_toml_str(v_raw).and_then(|p| parse_gpio_port_pin(&p)) { cfg.host_scl = s; },
+                "sda_pin" | "rx_pin" | "rx_sda_pin" => if let Some(s) = strip_toml_str(v_raw).and_then(|p| parse_gpio_port_pin(&p)) { cfg.host_sda = s; },
                 "address" => if let Some(v) = parse_num_u32(v_raw) { cfg.host_static_addr = v as u8; },
                 _ => {}
             },
+            s if s.starts_with("communication.") => {
+                let port_name = s.trim_start_matches("communication.").to_ascii_lowercase();
+                if port_name.starts_with("i3c") || port_name.starts_with("i2c") {
+                    if let Some(last_non_digit) = port_name.rfind(|c: char| !c.is_ascii_digit()) {
+                        let (prefix, suffix) = port_name.split_at(last_non_digit + 1);
+                        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+                            cfg.host_peripheral = format!("{}{}", prefix.to_ascii_uppercase(), suffix);
+                        }
+                    }
+                    match key {
+                        "peripheral" => if let Some(s) = strip_toml_str(v_raw) { cfg.host_peripheral = s.to_ascii_uppercase(); },
+                        "scl_pin" | "tx_pin" | "tx_scl_pin" => if let Some(s) = strip_toml_str(v_raw).and_then(|p| parse_gpio_port_pin(&p)) { cfg.host_scl = s; },
+                        "sda_pin" | "rx_pin" | "rx_sda_pin" => if let Some(s) = strip_toml_str(v_raw).and_then(|p| parse_gpio_port_pin(&p)) { cfg.host_sda = s; },
+                        "address" => if let Some(v) = parse_num_u32(v_raw) { cfg.host_static_addr = v as u8; },
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
     }
